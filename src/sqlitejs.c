@@ -45,6 +45,9 @@ typedef struct {
     JSValue             inverse_func;   // to release (window functions only)
 } functionjs_context;
 
+static char *sqlite_strdup (const char *str);
+static bool js_global_init (JSContext *ctx);
+
 #define SQLITEJS_VERSION        "1.0.0"
 static char gversion[128];
 
@@ -54,8 +57,9 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     JSRuntime *rt = NULL;
     JSContext *ctx = NULL;
     
-    globaljs_context *js = (globaljs_context *)calloc(1, sizeof(globaljs_context));
+    globaljs_context *js = (globaljs_context *)sqlite3_malloc(sizeof(globaljs_context));
     if (!js) return NULL;
+    bzero(js, sizeof(globaljs_context));
     
     rt = JS_NewRuntime();
     if (!rt) goto abort_init;
@@ -66,9 +70,8 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     ctx = JS_NewContext(rt);
     if (!ctx) goto abort_init;
     
-    JSValue global = JS_GetGlobalObject(ctx);
-    // add any global objects or functions here
-    JS_FreeValue(ctx, global);
+    JS_SetContextOpaque(ctx, db);
+    js_global_init(ctx);
     
     js->db = db;
     js->runtime = rt;
@@ -78,7 +81,7 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
 abort_init:
     if (rt) JS_FreeRuntime(rt);
     if (ctx) JS_FreeContext(ctx);
-    if (js) free(js);
+    if (js) sqlite3_free(js);
     return NULL;
 }
 
@@ -87,7 +90,7 @@ static void globaljs_free (globaljs_context *js) {
     
     if (js->runtime) JS_FreeRuntime(js->runtime);
     if (js->context) JS_FreeContext(js->context);
-    free(js);
+    sqlite3_free(js);
 }
 
 static functionjs_context *functionjs_init (globaljs_context *jsctx, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code) {
@@ -99,31 +102,32 @@ static functionjs_context *functionjs_init (globaljs_context *jsctx, const char 
     char *value_code_copy = NULL;
     char *inverse_code_copy = NULL;
     
-    fctx = (functionjs_context *)calloc(1, sizeof(functionjs_context));
+    fctx = (functionjs_context *)sqlite3_malloc(sizeof(functionjs_context));
     if (!fctx) goto cleanup;
+    bzero(fctx, sizeof(functionjs_context));
     
     if (init_code) {
-        init_code_copy = strdup(init_code);
+        init_code_copy = sqlite_strdup(init_code);
         if (!init_code_copy) goto cleanup;
     }
     
     if (step_code) {
-        step_code_copy = strdup(step_code);
+        step_code_copy = sqlite_strdup(step_code);
         if (!step_code_copy) goto cleanup;
     }
     
     if (final_code) {
-        final_code_copy = strdup(final_code);
+        final_code_copy = sqlite_strdup(final_code);
         if (!final_code_copy) goto cleanup;
     }
     
     if (value_code) {
-        value_code_copy = strdup(value_code);
+        value_code_copy = sqlite_strdup(value_code);
         if (!value_code_copy) goto cleanup;
     }
     
     if (inverse_code) {
-        inverse_code_copy = strdup(inverse_code);
+        inverse_code_copy = sqlite_strdup(inverse_code);
         if (!inverse_code_copy) goto cleanup;
     }
     
@@ -145,12 +149,12 @@ static functionjs_context *functionjs_init (globaljs_context *jsctx, const char 
     return fctx;
     
 cleanup:
-    if (init_code_copy) free(init_code_copy);
-    if (step_code_copy) free(step_code_copy);
-    if (final_code_copy) free(final_code_copy);
-    if (value_code_copy) free(value_code_copy);
-    if (inverse_code_copy) free(inverse_code_copy);
-    if (fctx) free(fctx);
+    if (init_code_copy) sqlite3_free(init_code_copy);
+    if (step_code_copy) sqlite3_free(step_code_copy);
+    if (final_code_copy) sqlite3_free(final_code_copy);
+    if (value_code_copy) sqlite3_free(value_code_copy);
+    if (inverse_code_copy) sqlite3_free(inverse_code_copy);
+    if (fctx) sqlite3_free(fctx);
     return NULL;
 }
 
@@ -172,16 +176,14 @@ static void functionjs_free (functionjs_context *fctx, bool complete) {
     fctx->agg_ctx = NULL;
     
     if (complete) {
-        if (fctx->init_code) free((void *)fctx->init_code);
-        if (fctx->step_code) free((void *)fctx->step_code);
-        if (fctx->final_code) free((void *)fctx->final_code);
-        if (fctx->value_code) free((void *)fctx->value_code);
-        if (fctx->inverse_code) free((void *)fctx->inverse_code);
-        free(fctx);
+        if (fctx->init_code) sqlite3_free((void *)fctx->init_code);
+        if (fctx->step_code) sqlite3_free((void *)fctx->step_code);
+        if (fctx->final_code) sqlite3_free((void *)fctx->final_code);
+        if (fctx->value_code) sqlite3_free((void *)fctx->value_code);
+        if (fctx->inverse_code) sqlite3_free((void *)fctx->inverse_code);
+        sqlite3_free(fctx);
     }
 }
-
-// MARK: - Utils -
 
 static void compute_version_string (void) {
     const char *s1 = SQLITEJS_VERSION;
@@ -228,6 +230,52 @@ static void compute_version_string (void) {
         if (*p1 == '.') p1++;
         if (*p2 == '.') p2++;
     }
+}
+
+// MARK: - Utils -
+
+static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql) {
+    //int rc = sqlite3_prepare_v2(db, sql, -1, sqlite3_stmt **ppStmt, const char **pzTail)
+    return JS_NewNumber(ctx, 3.1415);
+}
+
+static JSValue js_dbfunc_exec (JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    // check if we have at least one argument
+    if (argc < 1) return JS_EXCEPTION;
+    
+    // get the SQL string from the first argument
+    size_t len;
+    const char *sql = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!sql) return JS_EXCEPTION;
+    
+    // perform statement
+    sqlite3 *db = (sqlite3 *)JS_GetContextOpaque(ctx);
+    JSValue value = js_sqlite_exec(ctx, db, sql);
+    
+    // free the string when done
+    JS_FreeCString(ctx, sql);
+    
+    return value;
+}
+
+static bool js_global_init (JSContext *ctx) {
+    // add any global objects or functions here
+    JSValue global_obj = JS_GetGlobalObject(ctx);
+    
+    // create a new db object
+    JSValue db_obj =  JS_NewObject(ctx);
+    
+    // add the exec function to the db object
+    JS_SetPropertyStr(ctx, db_obj, "exec", JS_NewCFunction(ctx, js_dbfunc_exec, "exec", 1));
+    
+    // set the db object as a property of the global object
+    JS_SetPropertyStr(ctx, global_obj, "db", db_obj);
+    
+    // release the global object reference
+    JS_FreeValue(ctx, global_obj);
+    
+    // we don't free db_obj because it's now owned by the global object
+    return true;
 }
 
 static void js_dump_globals (JSContext *ctx) {
@@ -360,6 +408,10 @@ static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, 
         return false;
     }
     
+    // setup global object
+    JS_SetContextOpaque(ctx, sqlite3_context_db_handle(context));
+    js_global_init(ctx);
+    
     // init code is optional
     if (init_code) {
         JSValue result = JS_Eval(ctx, init_code, strlen(init_code), NULL, JS_EVAL_TYPE_GLOBAL);
@@ -453,6 +505,16 @@ static JSValue sqlite_value_to_js (JSContext *ctx, sqlite3_value *value) {
 static const char *sqlite_value_text (sqlite3_value *value) {
     if (sqlite3_value_type(value) != SQLITE_TEXT) return NULL;
     return (const char *)sqlite3_value_text(value);
+}
+
+static char *sqlite_strdup (const char *str) {
+    if (!str) return NULL;
+    
+    size_t len = strlen(str) + 1;
+    char *result = (char*)sqlite3_malloc((int)len);
+    if (result) memcpy(result, str, len);
+    
+    return result;
 }
 
 // MARK: - Execution -
@@ -710,7 +772,7 @@ static void js_load_file (sqlite3_context *context, int argc, sqlite3_value **ar
     size_t length = (size_t)ftell(f);
     fseek(f, 0, SEEK_SET);
     
-    char *buffer = malloc(length);
+    char *buffer = (char *)sqlite3_malloc((int)length);
     if (!buffer) {
         fclose(f);
         sqlite3_result_error_nomem(context);
@@ -719,10 +781,10 @@ static void js_load_file (sqlite3_context *context, int argc, sqlite3_value **ar
     
     size_t nread = fread(buffer, length, 1, f);
     if (nread == length) {
-        (is_blob) ? sqlite3_result_blob(context, buffer, (int)length, free) : sqlite3_result_text(context, buffer, (int)length, free);
+        (is_blob) ? sqlite3_result_blob(context, buffer, (int)length, sqlite3_free) : sqlite3_result_text(context, buffer, (int)length, sqlite3_free);
     } else {
         sqlite3_result_error(context, "Unable to correctly read the file", -1);
-        if (buffer) free(buffer);
+        if (buffer) sqlite3_free(buffer);
     }
     
     fclose(f);

@@ -35,6 +35,10 @@ int main (void) {
     
     printf("SQLite-JS version: %s\n\n", sqlitejs_version());
     
+    // db object
+    printf("Testing db\n");
+    rc = db_exec(db, "SELECT js_eval('db.exec(''SELECT 134;'');');");
+    
     // context
     printf("Testing context\n");
     rc = db_exec(db, "SELECT js_eval('x = 100;');");
