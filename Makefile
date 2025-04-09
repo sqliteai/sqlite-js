@@ -46,8 +46,6 @@ else ifeq ($(PLATFORM),macos)
 else # linux
     TARGET := $(DIST_DIR)/js.so
     LDFLAGS := -shared
-    # Linux-specific flags
-    CFLAGS += -fvisibility=hidden
 endif
 
 # Object files
@@ -102,7 +100,7 @@ endif
 
 # Testing the extension
 test: $(TARGET)
-	sqlite3 ":memory:" -cmd ".load ./$(TARGET)" "SELECT 1;"
+	sqlite3 ":memory:" -cmd ".bail on" ".load ./$(TARGET)" "SELECT 1;"
 
 # Help message
 help:
