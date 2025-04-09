@@ -24,13 +24,15 @@ int db_exec (sqlite3 *db, const char *sql) {
     return rc;
 }
 
+// MARK: -
+
 int main (void) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(":memory:", &db);
     if (rc != SQLITE_OK) goto abort_test;
     
     // manually load extension
-    rc = sqlite3_sqlitejs_init(db, NULL, NULL);
+    rc = sqlite3_js_init(db, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test;
     
     printf("SQLite-JS version: %s\n\n", sqlitejs_version());

@@ -808,7 +808,7 @@ const char *sqlitejs_version (void) {
     return gversion;
 }
 
-APIEXPORT int sqlite3_sqlitejs_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
+APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
     #ifndef SQLITE_CORE
     SQLITE_EXTENSION_INIT2(pApi);
     #endif
