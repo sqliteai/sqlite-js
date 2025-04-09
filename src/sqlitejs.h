@@ -16,7 +16,7 @@
 #include "sqlite3.h"
 #endif
 
-int sqlite3_sqlitejs_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
+int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
 const char *sqlitejs_version (void);
 
 #endif
