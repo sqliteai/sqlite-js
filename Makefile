@@ -58,7 +58,7 @@ $(shell mkdir -p $(BUILD_DIR) $(DIST_DIR))
 all: $(TARGET)
 
 # Link the final target
-$(TARGET): $(OBJ_FILES)
+$(TARGET): $(OBJ_FILES) $(DEF_FILE)
 	$(CC) $(LDFLAGS) -o $@ $^
 ifeq ($(PLATFORM),windows)
 	# Generate import library for Windows
