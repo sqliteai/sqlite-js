@@ -27,7 +27,7 @@ INCLUDES := -I$(SRC_DIR) -I$(LIB_DIR)
 
 # Compiler and flags
 CC := gcc
-CFLAGS := -Wall -Wextra -fPIC -g -O2 $(INCLUDES)
+CFLAGS := -Wall -Wextra -fPIC -g -O2 -DQJS_BUILD_LIBC $(INCLUDES)
 
 # Platform-specific settings
 ifeq ($(PLATFORM),windows)
