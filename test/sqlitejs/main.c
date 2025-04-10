@@ -10,6 +10,8 @@
 #include "quickjs.h"
 #include "sqlitejs.h"
 
+#define DB_PATH         "/Users/marco/Desktop/functions.sqlite"
+
 static int print_results_callback(void *data, int argc, char **argv, char **names) {
     for (int i = 0; i < argc; i++) {
         printf("%s: %s ", names[i], argv[i] ? argv[i] : "NULL");
@@ -26,7 +28,41 @@ int db_exec (sqlite3 *db, const char *sql) {
 
 // MARK: -
 
-int main (void) {
+int test_serialization (const char *db_path, bool load_functions, int nstep) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(db_path, &db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // manually load extension
+    rc = sqlite3_js_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    rc = db_exec(db, (load_functions) ? "SELECT js_init_table(1);" : "SELECT js_init_table();");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    printf("Step %d...\n", nstep);
+    
+    if (nstep == 1) {
+        rc = db_exec(db, "SELECT js_create_scalar('SuperFunction', '(function(args){return args[0];})')");
+        if (rc == SQLITE_OK) rc = db_exec(db, "SELECT SuperFunction(123), SuperFunction(12.3);");
+    }
+    if (nstep == 2) {
+        rc = db_exec(db, "SELECT js_create_scalar('SuperFunction', '(function(args){return args[0] * 2;})')");
+        if (rc == SQLITE_OK) rc = db_exec(db, "SELECT SuperFunction(123), SuperFunction(12.3);");
+    }
+    if (nstep == 3) {
+        rc = db_exec(db, "SELECT SuperFunction(123), SuperFunction(12.3);");
+    }
+    if (rc != SQLITE_OK) goto abort_test;
+    printf("\n");
+    
+abort_test:
+    if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
+int test_execution (void) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(":memory:", &db);
     if (rc != SQLITE_OK) goto abort_test;
@@ -34,8 +70,6 @@ int main (void) {
     // manually load extension
     rc = sqlite3_js_init(db, NULL, NULL);
     if (rc != SQLITE_OK) goto abort_test;
-    
-    printf("SQLite-JS version: %s\n\n", sqlitejs_version());
     
     // context
     printf("Testing context\n");
@@ -118,5 +152,19 @@ int main (void) {
 abort_test:
     if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db));
     if (db) sqlite3_close(db);
+    return rc;
+}
+
+// MARK: -
+
+int main (void) {
+    printf("SQLite-JS version: %s\n\n", sqlitejs_version());
+    
+    int rc = 0;//test_execution();
+    
+    rc = test_serialization(DB_PATH, false, 1); // create and execute original implementations
+    rc = test_serialization(DB_PATH, false, 2); // update functions previously registered in the js_functions table
+    rc = test_serialization(DB_PATH, true,  3); // load the new implementations
+    
     return rc;
 }

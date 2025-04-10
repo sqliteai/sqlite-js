@@ -51,7 +51,14 @@ static char *sqlite_strdup (const char *str);
 static bool js_global_init (JSContext *ctx, globaljs_context *js);
 static JSValue sqlite_value_to_js (JSContext *ctx, sqlite3_value *value);
 
-#define SQLITEJS_VERSION        "1.0.0"
+#define FUNCTION_TYPE_SCALAR            "scalar"
+#define FUNCTION_TYPE_WINDOW            "window"
+#define FUNCTION_TYPE_AGGREGATE         "aggregate"
+#define FUNCTION_TYPE_COLLATION         "collation"
+
+#define SAFE_STRCMP(a,b)                (((a) != (b)) && ((a) == NULL || (b) == NULL || strcmp((a), (b)) != 0))
+
+#define SQLITEJS_VERSION                "1.1.0"
 static char gversion[128];
 
 // MARK: - RowSet -
@@ -350,6 +357,7 @@ static void compute_version_string (void) {
 static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql, int argc, JSValueConst *argv) {
     sqlite3_stmt *vm = NULL;
     const char *tail = NULL;
+    rowset *rs = NULL;
     
     // compile statement
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, &tail);
@@ -366,7 +374,7 @@ static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql, int
     }
     
     // create and initialize internal rowset
-    rowset *rs = (rowset *)sqlite3_malloc(sizeof(rowset));
+    rs = (rowset *)sqlite3_malloc(sizeof(rowset));
     if (!rs) goto abort_with_dberror;
     rs->vm = vm;
     rs->ncols = sqlite3_column_count(vm);
@@ -381,12 +389,18 @@ static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql, int
     return obj;
     
 abort_with_dberror:
-    rs->vm = NULL;
+    if (rs) {
+        if (rs->vm) rs->vm = NULL;
+        sqlite3_free(rs);
+    }
     if (vm) sqlite3_finalize(vm);
     return JS_ThrowInternalError(ctx, "%s", sqlite3_errmsg(db));
     
 abort_with_jserror:
-    rs->vm = NULL;
+    if (rs) {
+        if (rs->vm) rs->vm = NULL;
+        sqlite3_free(rs);
+    }
     if (vm) sqlite3_finalize(vm);
     return obj;
 }
@@ -771,9 +785,145 @@ static void js_execute_cleanup (void *xdata) {
 
 // MARK: - Functions -
 
-void js_create_scalar (sqlite3_context *context, int argc, sqlite3_value **argv) {
+void js_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    sqlite3_result_text(context, gversion, -1, NULL);
+}
+
+bool js_add_to_table (sqlite3_context *context, const char *type, const char *name, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code) {
+    
+    // add function to table under the following conditions:
+    // 1. js_functions table exists
+    // 2. the same function with the same code is not already in the table (we prevented replacing it with the same values to avoid unnecessary CRDT operations in case this table is synced with sqlite-sync)
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    bool force_reinsert = false;
+    sqlite3_stmt *vm = NULL;
+    
+    // query table first
+    const char *sql = "SELECT kind,init_code,step_code,final_code,value_code,inverse_code FROM js_functions WHERE name=?1 LIMIT 1;";
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) {
+        // table js_functions does not exist
+        sqlite3_finalize(vm);
+        return true;
+    }
+    
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) {
+        // no functions with that name exist, so add it to the table
+        force_reinsert = true;
+        goto insert_function;
+    } if (rc != SQLITE_ROW) {
+        // something bad happened, just abort
+        sqlite3_finalize(vm);
+        return false;
+    }
+    
+    const char *type2 = (const char *)sqlite3_column_text(vm, 0);
+    const char *init_code2 = (sqlite3_column_type(vm, 1) == SQLITE_NULL) ? NULL : (const char *)sqlite3_column_text(vm, 1);
+    const char *step_code2 = (sqlite3_column_type(vm, 2) == SQLITE_NULL) ? NULL : (const char *)sqlite3_column_text(vm, 2);
+    const char *final_code2 = (sqlite3_column_type(vm, 3) == SQLITE_NULL) ? NULL : (const char *)sqlite3_column_text(vm, 3);
+    const char *value_code2 = (sqlite3_column_type(vm, 4) == SQLITE_NULL) ? NULL : (const char *)sqlite3_column_text(vm, 4);
+    const char *inverse_code2 = (sqlite3_column_type(vm, 5) == SQLITE_NULL) ? NULL : (const char *)sqlite3_column_text(vm, 5);
+    
+    if ((strcasecmp(type, type2) != 0) ||
+        SAFE_STRCMP(init_code, init_code2) ||
+        SAFE_STRCMP(step_code, step_code2) ||
+        SAFE_STRCMP(final_code, final_code2) ||
+        SAFE_STRCMP(value_code, value_code2) ||
+        SAFE_STRCMP(inverse_code, inverse_code2)) force_reinsert = true;
+    
+    // the following logic:
+    // if ((init_code == NULL) && (init_code2 != NULL)) force_reinsert = true;
+    // if ((init_code != NULL) && (init_code2 == NULL)) force_reinsert = true;
+    // if ((init_code != NULL) && (init_code2 != NULL) && (strcmp(init_code, init_code2) != 0)) force_reinsert = true;
+    // can be simplified as:
+    // if ((init_code != init_code2) && (init_code == NULL || init_code2 == NULL || strcmp(init_code, init_code2) != 0)) force_reinsert = true;
+    // as a macro:
+    //  SAFE_STRCMP(a,b) (((a) != (b)) && ((a) == NULL || (b) == NULL || strcmp((a), (b)) != 0))
+    
+    // we use strcmp because even if a single character case changes, we force the update of that function
+    
+insert_function:
+    sqlite3_finalize(vm);
+    if (force_reinsert == false) return true;
+    
+    sql = "REPLACE INTO js_functions (name, kind, init_code, step_code, final_code, value_code, inverse_code) VALUES (?, ?, ?, ?, ?, ?, ?);";
+    rc = sqlite3_prepare(db, sql, -1, &vm, NULL);
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_bind_text(vm, 1, name, -1, NULL);
+        rc = sqlite3_bind_text(vm, 2, type, -1, NULL);
+        rc = (init_code == NULL) ? sqlite3_bind_null(vm, 3) : sqlite3_bind_text(vm, 3, init_code, -1, NULL);
+        rc = (step_code == NULL) ? sqlite3_bind_null(vm, 4) : sqlite3_bind_text(vm, 4, step_code, -1, NULL);
+        rc = (final_code == NULL) ? sqlite3_bind_null(vm, 5) : sqlite3_bind_text(vm, 5, final_code, -1, NULL);
+        rc = (value_code == NULL) ? sqlite3_bind_null(vm, 6) : sqlite3_bind_text(vm, 6, value_code, -1, NULL);
+        rc = (inverse_code == NULL) ? sqlite3_bind_null(vm, 7) : sqlite3_bind_text(vm, 7, inverse_code, -1, NULL);
+    }
+    
+    rc = sqlite3_step(vm);
+    sqlite3_finalize(vm);
+    
+    return (rc == SQLITE_DONE);
+}
+
+bool js_create_common (sqlite3_context *context, const char *type, const char *name, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code, bool is_load) {
+    
     globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
     
+    bool is_scalar = (strcasecmp(type, FUNCTION_TYPE_SCALAR) == 0);
+    bool is_aggregate = (is_scalar) ? false : (strcasecmp(type, FUNCTION_TYPE_AGGREGATE) == 0);
+    bool is_window = (is_aggregate) ? false : (strcasecmp(type, FUNCTION_TYPE_WINDOW) == 0);
+    bool is_collation = (is_window) ? false : (strcasecmp(type, FUNCTION_TYPE_COLLATION) == 0);
+    bool step_code_null = (is_scalar || is_collation);
+    
+    if (is_aggregate || is_window) {
+        // sanity check aggregate code
+        if (js_setup_aggregate(context, js, NULL, init_code, step_code, final_code, NULL, NULL) == false) return false;
+    }
+    
+    // create function context
+    functionjs_context *fctx = functionjs_init(js, init_code, (step_code_null) ? NULL : step_code, final_code, value_code, inverse_code);
+    if (!fctx) {
+        sqlite3_result_error_nomem(context);
+        return false;
+    }
+    
+    if (is_scalar || is_collation) {
+        // prepare the JavaScript function
+        JSValue func = JS_Eval(js->context, step_code, strlen(step_code), NULL, JS_EVAL_TYPE_GLOBAL);
+        if (!JS_IsFunction(js->context, func)) {
+            const char *err_msg = (is_scalar) ? "JavaScript code must evaluate to a function in the form (function(args){ your_code_here })" : "JavaScript code must evaluate to a function in the form (function(str1, str2){ your_code_here })";
+            js_error_to_sqlite(context, js->context, func, err_msg);
+            functionjs_free(fctx, true);
+            return false;
+        }
+        fctx->step_func = func;
+    }
+    
+    int rc = SQLITE_OK;
+    if (is_scalar) rc = sqlite3_create_function_v2(sqlite3_context_db_handle(context), name, -1, SQLITE_UTF8, (void *)fctx, js_execute_scalar, NULL, NULL, js_execute_cleanup);
+    else if (is_aggregate) rc = sqlite3_create_function_v2(sqlite3_context_db_handle(context), name, -1, SQLITE_UTF8, (void *)fctx, NULL, js_execute_step, js_execute_final, js_execute_cleanup);
+    else if (is_window) rc = sqlite3_create_window_function(sqlite3_context_db_handle(context), name, -1, SQLITE_UTF8, (void *)fctx, js_execute_step, js_execute_final, js_execute_value, js_execute_inverse, js_execute_cleanup);
+    else if (is_collation) rc = sqlite3_create_collation_v2(sqlite3_context_db_handle(context), name, SQLITE_UTF8, (void *)fctx, js_execute_collation, js_execute_cleanup);
+    
+    if (rc == SQLITE_BUSY) {
+        // Due to this: https://www3.sqlite.org/src/info/cabab62bc10568d4
+        // it is not possible to update or delete a previously registered function
+        // within the same database connection.
+        // There is nothing we can do because this is an SQLite implementation detail.
+        // Function updates must be performed using a separate database connection.
+        sqlite3_result_error(context, "Function updates must be performed using a separate database connection.", -1);
+    }
+    
+    if ((is_load == false) && (rc == SQLITE_OK)) {
+        js_add_to_table(context, type, name, init_code, step_code, final_code, value_code, inverse_code);
+    }
+    
+    // js_execute_cleanup is automatically called in case of error
+    (rc == SQLITE_OK) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, rc);
+    return (rc == SQLITE_OK);
+}
+
+void js_create_scalar (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // get/check parameters first
     const char *name = sqlite_value_text(argv[0]);
     const char *code = sqlite_value_text(argv[1]);
@@ -783,32 +933,10 @@ void js_create_scalar (sqlite3_context *context, int argc, sqlite3_value **argv)
         return;
     }
     
-    // create function context
-    functionjs_context *fctx = functionjs_init(js, NULL, NULL, NULL, NULL, NULL);
-    if (!fctx) {
-        sqlite3_result_error_nomem(context);
-        return;
-    }
-    
-    // prepare the JavaScript function
-    JSValue func = JS_Eval(js->context, code, strlen(code), NULL, JS_EVAL_TYPE_GLOBAL);
-    if (!JS_IsFunction(js->context, func)) {
-        js_error_to_sqlite(context, js->context, func, "JavaScript code must evaluate to a function in the form (function(args){ your_code_here })");
-        functionjs_free(fctx, true);
-        return;
-    }
-    
-    // create the SQLite scalar function
-    fctx->step_func = func;
-    int rc = sqlite3_create_function_v2(sqlite3_context_db_handle(context), name, -1, SQLITE_UTF8, (void *)fctx, js_execute_scalar, NULL, NULL, js_execute_cleanup);
-    
-    // js_execute_cleanup is automatically called in case of error
-    (rc == SQLITE_OK) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, rc);
+    js_create_common(context, FUNCTION_TYPE_SCALAR, name, NULL, code, NULL, NULL, NULL, false);
 }
 
 void js_create_aggregate (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
-    
     // get/check parameters first
     const char *name = sqlite_value_text(argv[0]);
     const char *init_code = sqlite_value_text(argv[1]);
@@ -820,26 +948,10 @@ void js_create_aggregate (sqlite3_context *context, int argc, sqlite3_value **ar
         return;
     }
     
-    // sanity check aggregate code
-    if (js_setup_aggregate(context, js, NULL, init_code, step_code, final_code, NULL, NULL) == false) return;
-    
-    // create function context
-    functionjs_context *fctx = functionjs_init(js, init_code, step_code, final_code, NULL, NULL);
-    if (!fctx) {
-        sqlite3_result_error_nomem(context);
-        return;
-    }
-     
-    // create the SQLite aggregate function
-    int rc = sqlite3_create_function_v2(sqlite3_context_db_handle(context), name, -1, SQLITE_UTF8, (void *)fctx, NULL, js_execute_step, js_execute_final, js_execute_cleanup);
-    
-    // js_execute_cleanup is automatically called in case of error
-    (rc == SQLITE_OK) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, rc);
+    js_create_common(context, FUNCTION_TYPE_AGGREGATE, name, init_code, step_code, final_code, NULL, NULL, false);
 }
 
 void js_create_window (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
-    
     // get/check parameters first
     const char *name = sqlite_value_text(argv[0]);
     const char *init_code = sqlite_value_text(argv[1]);
@@ -853,26 +965,10 @@ void js_create_window (sqlite3_context *context, int argc, sqlite3_value **argv)
         return;
     }
     
-    // sanity check aggregate code
-    if (js_setup_aggregate(context, js, NULL, init_code, step_code, final_code, value_code, inverse_code) == false) return;
-    
-    // create function context
-    functionjs_context *fctx = functionjs_init(js, init_code, step_code, final_code, value_code, inverse_code);
-    if (!fctx) {
-        sqlite3_result_error_nomem(context);
-        return;
-    }
-    
-    // create the SQLite window function
-    int rc = sqlite3_create_window_function(sqlite3_context_db_handle(context), name, -1, SQLITE_UTF8, (void *)fctx, js_execute_step, js_execute_final, js_execute_value, js_execute_inverse, js_execute_cleanup);
-    
-    // js_execute_cleanup is automatically called in case of error
-    (rc == SQLITE_OK) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, rc);
+    js_create_common(context, FUNCTION_TYPE_WINDOW, name, init_code, step_code, final_code, value_code, inverse_code, false);
 }
 
 void js_create_collation (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
-    
     // get/check parameters first
     const char *name = sqlite_value_text(argv[0]);
     const char *code = sqlite_value_text(argv[1]);
@@ -882,27 +978,7 @@ void js_create_collation (sqlite3_context *context, int argc, sqlite3_value **ar
         return;
     }
     
-    // create function context
-    functionjs_context *fctx = functionjs_init(js, NULL, NULL, NULL, NULL, NULL);
-    if (!fctx) {
-        sqlite3_result_error_nomem(context);
-        return;
-    }
-    
-    // prepare the JavaScript function
-    JSValue func = JS_Eval(js->context, code, strlen(code), NULL, JS_EVAL_TYPE_GLOBAL);
-    if (!JS_IsFunction(js->context, func)) {
-        js_error_to_sqlite(context, js->context, func, "JavaScript code must evaluate to a function in the form (function(str1, str2){ your_code_here })");
-        functionjs_free(fctx, true);
-        return;
-    }
-    
-    // create the SQLite function
-    fctx->step_func = func;
-    int rc = sqlite3_create_collation_v2(sqlite3_context_db_handle(context), name, SQLITE_UTF8, (void *)fctx, js_execute_collation, js_execute_cleanup);
-    
-    // js_execute_cleanup is automatically called in case of error
-    (rc == SQLITE_OK) ? sqlite3_result_int(context, SQLITE_OK) : sqlite3_result_error_code(context, rc);
+    js_create_common(context, FUNCTION_TYPE_COLLATION, name, NULL, code, NULL, NULL, NULL, false);
 }
 
 void js_eval (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -962,13 +1038,67 @@ void js_load_blob (sqlite3_context *context, int argc, sqlite3_value **argv) {
     js_load_fromfile(context, argc, argv, true);
 }
 
-void js_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    sqlite3_result_text(context, gversion, -1, NULL);
+int js_load_from_table_callback (void *xdata, int ncols, char **values, char **names) {
+    sqlite3_context *context = (sqlite3_context *)xdata;
+    assert(ncols == 7);
+    
+    const char *type = values[1];
+    
+    const char *name = values[0];
+    const char *init_code = values[2];
+    const char *step_code = values[3];
+    const char *final_code = values[4];
+    const char *value_code = values[5];
+    const char *inverse_code = values[6];
+    
+    bool result = js_create_common(context, type, name, init_code, step_code, final_code, value_code, inverse_code, true);
+    return (result) ? SQLITE_OK : SQLITE_ERROR;
+}
+
+int js_load_from_table (sqlite3_context *context) {
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    const char *sql = "SELECT * FROM js_functions;";
+    return sqlite3_exec(db, sql, js_load_from_table_callback, context, NULL);
+}
+
+void js_init_table (sqlite3_context *context, bool load_functions) {
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    const char *sql = "CREATE TABLE IF NOT EXISTS js_functions ("
+    "name TEXT PRIMARY KEY COLLATE NOCASE," // Name of the SQLite function or collation
+    "kind TEXT NOT NULL,"                   // 'scalar', 'aggregate', 'window', 'collation'
+    "init_code TEXT DEFAULT NULL,"          // Only for aggregate/window
+    "step_code TEXT DEFAULT NULL,"          // Used in all functions
+    "final_code TEXT DEFAULT NULL,"         // Only for aggregate/window
+    "value_code TEXT DEFAULT NULL,"         // Only for window
+    "inverse_code TEXT DEFAULT NULL"        // Only for window
+    ");";
+    
+    // create table
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error_code(context, rc);
+        return;
+    }
+    
+    // load js functions from table
+    if (load_functions) rc = js_load_from_table(context);
+    
+    sqlite3_result_int(context, rc);
+}
+
+void js_init_table1 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    bool load_functions = (sqlite3_value_int(argv[0]) != 0);
+    js_init_table(context, load_functions);
+}
+
+void js_init_table0 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    js_init_table(context, false);
 }
 
 // MARK: -
 
 const char *sqlitejs_version (void) {
+    if (gversion[0] == 0) compute_version_string();
     return gversion;
 }
 
@@ -977,15 +1107,12 @@ APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_r
     SQLITE_EXTENSION_INIT2(pApi);
     #endif
     
-    // setup version
-    compute_version_string();
-    
     globaljs_context *data = globaljs_init(db);
     if (!data) return SQLITE_NOMEM;
     
-    const char *f_name[] = {"js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob"};
-    const void *f_ptr[] = {js_version, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob};
-    int f_arg[] = {0, 2, 4, 6, 2, 1, 1, 1};
+    const char *f_name[] = {"js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob", "js_init_table", "js_init_table"};
+    const void *f_ptr[] = {js_version, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob, js_init_table0, js_init_table1};
+    int f_arg[] = {0, 2, 4, 6, 2, 1, 1, 1, 0, 1};
     
     size_t f_count = sizeof(f_name) / sizeof(const char *);
     for (size_t i=0; i<f_count; ++i) {
