@@ -11,6 +11,7 @@
 #include <assert.h>
 #include "sqlitejs.h"
 #include "quickjs.h"
+#include "quickjs-libc.h"
 
 #ifndef SQLITE_CORE
 SQLITE_EXTENSION_INIT1
@@ -26,6 +27,7 @@ typedef struct {
     JSRuntime           *runtime;
     JSContext           *context;
     sqlite3             *db;
+    JSClassID           rowSetClassID;
 } globaljs_context;
 
 typedef struct {
@@ -46,10 +48,117 @@ typedef struct {
 } functionjs_context;
 
 static char *sqlite_strdup (const char *str);
-static bool js_global_init (JSContext *ctx);
+static bool js_global_init (JSContext *ctx, globaljs_context *js);
+static JSValue sqlite_value_to_js (JSContext *ctx, sqlite3_value *value);
 
 #define SQLITEJS_VERSION        "1.0.0"
 static char gversion[128];
+
+// MARK: - RowSet -
+
+typedef struct {
+    int             ncols;
+    sqlite3_stmt    *vm;
+} rowset;
+
+static void js_rowset_finalizer(JSRuntime *rt, JSValue val);
+static JSValue js_rowset_next(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_rowset_get(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_rowset_name(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_rowset_to_array(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+
+// Define the Rowset class
+static const JSClassDef js_rowset_class = {
+    "Rowset",
+    .finalizer = js_rowset_finalizer,
+};
+
+// Define the Rowset prototype with methods
+static const JSCFunctionListEntry js_rowset_proto_funcs[] = {
+    JS_CFUNC_DEF("next", 0, js_rowset_next),
+    JS_CFUNC_DEF("get", 1, js_rowset_get),
+    JS_CFUNC_DEF("name", 1, js_rowset_name),
+    JS_CFUNC_DEF("toArray", 0, js_rowset_to_array),
+};
+
+static JSValue js_rowset_next(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    globaljs_context *js = JS_GetContextOpaque(ctx);
+    rowset *rs = JS_GetOpaque(this_val, js->rowSetClassID);
+    if (!rs) return JS_EXCEPTION;
+    
+    if (sqlite3_step(rs->vm) == SQLITE_ROW) return JS_TRUE;
+    
+    sqlite3_finalize(rs->vm);
+    rs->vm = NULL;
+    return JS_FALSE;
+}
+
+static JSValue js_rowset_get(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    globaljs_context *js = JS_GetContextOpaque(ctx);
+    rowset *rs = JS_GetOpaque(this_val, js->rowSetClassID);
+    if (!rs) return JS_EXCEPTION;
+    
+    uint32_t index = 0;
+    JS_ToUint32(ctx, &index, argv[0]);
+    if (index >= rs->ncols) return JS_EXCEPTION;
+    
+    sqlite3_value *value = sqlite3_column_value(rs->vm, (int)index);
+    return sqlite_value_to_js(ctx, value);
+}
+
+static JSValue js_rowset_name(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    globaljs_context *js = JS_GetContextOpaque(ctx);
+    rowset *rs = JS_GetOpaque(this_val, js->rowSetClassID);
+    if (!rs) return JS_EXCEPTION;
+    
+    uint32_t index = 0;
+    JS_ToUint32(ctx, &index, argv[0]);
+    if (index >= rs->ncols) return JS_EXCEPTION;
+    
+    const char *name = sqlite3_column_name(rs->vm, (int)index);
+    if (!name) return JS_EXCEPTION;
+    
+    return JS_NewString(ctx, name);
+}
+
+static JSValue js_rowset_to_array(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    globaljs_context *js = JS_GetContextOpaque(ctx);
+    rowset *rs = JS_GetOpaque(this_val, js->rowSetClassID);
+    if (!rs) return JS_EXCEPTION;
+    
+    JSValue result = JS_NewArray(ctx);
+    if (JS_IsException(result)) return JS_EXCEPTION;
+    
+    int ncols = rs->ncols;
+    int nrows = 0;
+    while (true) {
+        int rc = sqlite3_step(rs->vm);
+        if (rc != SQLITE_ROW) break;
+        
+        JSValue row = JS_NewArray(ctx);
+        if (JS_IsException(row)) return JS_EXCEPTION;
+        
+        for (int i=0; i<ncols; ++i) {
+            sqlite3_value *value = sqlite3_column_value(rs->vm, i);
+            JSValue jvalue = sqlite_value_to_js(ctx, value);
+            JS_SetPropertyUint32(ctx, row, i, jvalue);
+        }
+        
+        JS_SetPropertyUint32(ctx, result, nrows++, row);
+    }
+    
+    sqlite3_finalize(rs->vm);
+    rs->vm = NULL;
+    return result;
+}
+
+static void js_rowset_finalizer(JSRuntime *rt, JSValue val) {
+    rowset *rs = (rowset *)JS_VALUE_GET_PTR(val);
+    if (!rs) return;
+    
+    if (rs->vm) sqlite3_finalize(rs->vm);
+    sqlite3_free(rs);
+}
 
 // MARK: - Initializer -
 
@@ -67,15 +176,19 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     //JS_SetMemoryLimit(rt, 80 * 1024);
     //JS_SetMaxStackSize(rt, 10 * 1024);
     
+    js_std_init_handlers(rt);
+    JS_SetModuleLoaderFunc(rt, NULL, js_module_loader, NULL);
+    
     ctx = JS_NewContext(rt);
     if (!ctx) goto abort_init;
-    
-    JS_SetContextOpaque(ctx, db);
-    js_global_init(ctx);
     
     js->db = db;
     js->runtime = rt;
     js->context = ctx;
+    
+    JS_SetContextOpaque(ctx, js);
+    js_global_init(ctx, js);
+    
     return js;
     
 abort_init:
@@ -234,9 +347,48 @@ static void compute_version_string (void) {
 
 // MARK: - Utils -
 
-static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql) {
-    //int rc = sqlite3_prepare_v2(db, sql, -1, sqlite3_stmt **ppStmt, const char **pzTail)
-    return JS_NewNumber(ctx, 3.1415);
+static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql, int argc, JSValueConst *argv) {
+    sqlite3_stmt *vm = NULL;
+    const char *tail = NULL;
+    
+    // compile statement
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, &tail);
+    if (rc != SQLITE_OK) goto abort_with_dberror;
+    
+    // count if statement contains bindings
+    int nbind = sqlite3_bind_parameter_count(vm);
+    if (nbind > 0 && argc > 0) {
+        // loop to bind
+        if (nbind > argc) nbind = argc;
+        for (int i=1; i<=nbind; ++i) {
+            
+        }
+    }
+    
+    // create and initialize internal rowset
+    rowset *rs = (rowset *)sqlite3_malloc(sizeof(rowset));
+    if (!rs) goto abort_with_dberror;
+    rs->vm = vm;
+    rs->ncols = sqlite3_column_count(vm);
+    
+    // create Rowset JS object
+    globaljs_context *js = JS_GetContextOpaque(ctx);    
+    JSValue obj = JS_NewObjectClass(ctx, js->rowSetClassID);
+    if (JS_IsException(obj)) goto abort_with_jserror;
+    JS_SetOpaque(obj, rs);
+    JS_SetPropertyStr(ctx, obj, "columnCount", JS_NewInt32(ctx, rs->ncols));
+    
+    return obj;
+    
+abort_with_dberror:
+    rs->vm = NULL;
+    if (vm) sqlite3_finalize(vm);
+    return JS_ThrowInternalError(ctx, "%s", sqlite3_errmsg(db));
+    
+abort_with_jserror:
+    rs->vm = NULL;
+    if (vm) sqlite3_finalize(vm);
+    return obj;
 }
 
 static JSValue js_dbfunc_exec (JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -249,8 +401,8 @@ static JSValue js_dbfunc_exec (JSContext *ctx, JSValueConst this_val, int argc, 
     if (!sql) return JS_EXCEPTION;
     
     // perform statement
-    sqlite3 *db = (sqlite3 *)JS_GetContextOpaque(ctx);
-    JSValue value = js_sqlite_exec(ctx, db, sql);
+    globaljs_context *js = JS_GetContextOpaque(ctx);
+    JSValue value = js_sqlite_exec(ctx, js->db, sql, argc-1, argv);
     
     // free the string when done
     JS_FreeCString(ctx, sql);
@@ -258,18 +410,28 @@ static JSValue js_dbfunc_exec (JSContext *ctx, JSValueConst this_val, int argc, 
     return value;
 }
 
-static bool js_global_init (JSContext *ctx) {
+static bool js_global_init (JSContext *ctx, globaljs_context *js) {
+    js_std_add_helpers(ctx, 0, NULL);
+    
     // add any global objects or functions here
     JSValue global_obj = JS_GetGlobalObject(ctx);
     
     // create a new db object
     JSValue db_obj =  JS_NewObject(ctx);
-    
-    // add the exec function to the db object
     JS_SetPropertyStr(ctx, db_obj, "exec", JS_NewCFunction(ctx, js_dbfunc_exec, "exec", 1));
-    
-    // set the db object as a property of the global object
     JS_SetPropertyStr(ctx, global_obj, "db", db_obj);
+    
+    // register rowset class
+    JS_NewClassID(js->runtime, &js->rowSetClassID);
+    JS_NewClass(js->runtime, js->rowSetClassID, &js_rowset_class);
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, proto, js_rowset_proto_funcs, sizeof(js_rowset_proto_funcs)/sizeof(js_rowset_proto_funcs[0]));
+    JS_SetClassProto(ctx, js->rowSetClassID, proto);
+    
+    // register standard modules
+    js_init_module_std(ctx, "std");
+    js_init_module_os(ctx, "os");
+    js_init_module_bjson(ctx, "bjson");
     
     // release the global object reference
     JS_FreeValue(ctx, global_obj);
@@ -340,17 +502,17 @@ static void js_error_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
     if (!JS_IsNull(exception)) JS_FreeValue(js_ctx, exception);
 }
 
-static void js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSValue value) {
+static bool js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSValue value) {
     // check for exceptions first and convert it to a proper error message (if any)
     if (JS_IsException(value)) {
         js_error_to_sqlite(context, js_ctx, value, NULL);
-        return;
+        return false;
     }
     
     // check for null or undefined
     if (JS_IsNull(value) || JS_IsUndefined(value)) {
         sqlite3_result_null(context);
-        return;
+        return false;
     }
     
     // handle numbers
@@ -368,13 +530,13 @@ static void js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
             // handle BigInt if needed
             sqlite3_result_null(context);
         }
-        return;
+        return false;
     }
     
     // handle booleans
     if (JS_IsBool(value)) {
         sqlite3_result_int(context, JS_ToBool(js_ctx, value));
-        return;
+        return false;
     }
     
     // handle strings
@@ -387,16 +549,17 @@ static void js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
         } else {
             sqlite3_result_error(context, "Failed to convert JS string", -1);
         }
-        return;
+        return false;
     }
     
     if (JS_IsObject(value)) {
-        sqlite3_result_error(context, "Value is an object", -1);
-        return;
+        sqlite3_result_null(context);
+        return true;
     }
     
     // fallback for unsupported types
     sqlite3_result_error(context, "Unsupported JS value type", -1);
+    return false;
 }
 
 static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, functionjs_context *fctx, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code) {
@@ -409,8 +572,8 @@ static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, 
     }
     
     // setup global object
-    JS_SetContextOpaque(ctx, sqlite3_context_db_handle(context));
-    js_global_init(ctx);
+    JS_SetContextOpaque(ctx, js);
+    js_global_init(ctx, js);
     
     // init code is optional
     if (init_code) {
@@ -537,8 +700,9 @@ static void js_execute_commong (sqlite3_context *context, int nvalues, sqlite3_v
     JSValue result = JS_Call(js_context, func, this_obj, (values) ? 1 : 0, (values) ? args_val : NULL);
     JS_FreeValue(js_context, args);
     
-    if (return_value) js_value_to_sqlite(context, js_context, result);
-    JS_FreeValue(js_context, result);
+    bool is_object = false;
+    if (return_value) is_object = js_value_to_sqlite(context, js_context, result);
+    if (!is_object) JS_FreeValue(js_context, result);
 }
 
 static void js_execute_scalar (sqlite3_context *context, int nvalues, sqlite3_value **values) {
@@ -751,11 +915,11 @@ void js_eval (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
     
     JSValue value = JS_Eval(data->context, code, strlen(code), NULL, JS_EVAL_TYPE_GLOBAL);
-    js_value_to_sqlite(context, data->context, value);
-    JS_FreeValue(data->context, value);
+    bool is_object = js_value_to_sqlite(context, data->context, value);
+    if (!is_object) JS_FreeValue(data->context, value);
 }
 
-static void js_load_file (sqlite3_context *context, int argc, sqlite3_value **argv, bool is_blob) {
+static void js_load_fromfile (sqlite3_context *context, int argc, sqlite3_value **argv, bool is_blob) {
     const char *path = (const char *)sqlite3_value_text(argv[0]);
     if (!path) {
         sqlite3_result_error(context, "A parameter of type TEXT is required", -1);
@@ -791,11 +955,11 @@ static void js_load_file (sqlite3_context *context, int argc, sqlite3_value **ar
 }
 
 void js_load_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    js_load_file(context, argc, argv, false);
+    js_load_fromfile(context, argc, argv, false);
 }
 
 void js_load_blob (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    js_load_file(context, argc, argv, true);
+    js_load_fromfile(context, argc, argv, true);
 }
 
 void js_version (sqlite3_context *context, int argc, sqlite3_value **argv) {

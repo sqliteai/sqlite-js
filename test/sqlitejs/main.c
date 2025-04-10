@@ -37,10 +37,6 @@ int main (void) {
     
     printf("SQLite-JS version: %s\n\n", sqlitejs_version());
     
-    // db object
-    printf("Testing db\n");
-    rc = db_exec(db, "SELECT js_eval('db.exec(''SELECT 134;'');');");
-    
     // context
     printf("Testing context\n");
     rc = db_exec(db, "SELECT js_eval('x = 100;');");
@@ -69,6 +65,10 @@ int main (void) {
     rc = db_exec(db, "SELECT Median(val) FROM data;");
     rc = db_exec(db, "INSERT INTO data(val) VALUES (10), (12), (14), (16), (18), (20);");
     rc = db_exec(db, "SELECT Median(val) FROM data;");
+    
+    // db object
+    printf("\nTesting db.exec\n");
+    rc = db_exec(db, "SELECT js_eval('let rs = db.exec(''SELECT * FROM data;''); console.log(`rowset = ${rs.toArray()}`);');");
     
     // collation
     printf("\nTesting js_create_collation\n");
