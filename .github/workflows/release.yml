@@ -10,7 +10,7 @@ permissions:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    name: build for ${{ matrix.name }}-${{ matrix.arch }}
+    name: build for ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -23,7 +23,6 @@ jobs:
             arch: arm64
             name: linux
           - os: macos-latest
-            arch: uni
             name: macos
           - os: windows-latest
             arch: x86_64
@@ -55,7 +54,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4.6.2
         with:
-          name: js-${{ matrix.name }}-${{ matrix.arch }}
+          name: js-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
           path: dist/js.*
           if-no-files-found: error
 
@@ -75,57 +74,35 @@ jobs:
         with:
           path: artifacts
 
-      - name: generate release tag name
+      - name: release tag version from sqlitejs.h
         id: tag
         run: |
-          # get the current year and month
-          YEAR=$(date +"%Y")
-          MONTH=$(date +"%m")
-
-          # calculate the first value (year difference from 2025)
-          FIRST=$((YEAR - 2024)) # 2025 is 1, 2026 is 2, etc.
-
-          # calculate the second value (month number)
-          SECOND=$((10#$MONTH))
-
-          # get the latest tag from the repo
-          LATEST_TAG=$(gh release view --json tagName -q '.tagName' 2>/dev/null || echo "0.0.0")
-
-          # extract the first, second, and third values from the latest tag
-          LATEST_FIRST=$(echo "$LATEST_TAG" | cut -d. -f1)
-          LATEST_SECOND=$(echo "$LATEST_TAG" | cut -d. -f2)
-          LATEST_THIRD=$(echo "$LATEST_TAG" | cut -d. -f3)
-
-          # check if year and month match the current values
-          if [[ "$FIRST" -eq "$LATEST_FIRST" && "$SECOND" -eq "$LATEST_SECOND" ]]; then
-            # increment the third value, it's the n release of the month
-            THIRD=$((LATEST_THIRD + 1))
-          else
-            # start from 0 if it's the first release of the month
-            THIRD=0
+          FILE="src/sqlitejs.h"
+          VERSION=$(grep -oP '#define SQLITE_JS_VERSION "\K[^"]+' "$FILE")
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            exit 0
           fi
-
-          # combine the values with full stops
-          TAG="${FIRST}.${SECOND}.${THIRD}"
-          echo "name=$TAG" >> $GITHUB_OUTPUT
-
+          echo "❌ SQLITE_JS_VERSION not found in sqlitejs.h"
+          exit 1
+          
       - name: zip artifacts
         run: |
           for folder in "artifacts"/*; do
             if [ -d "$folder" ]; then
               name=$(basename "$folder")
-              zip -jq "${name}-${{ steps.tag.outputs.name }}.zip" "$folder"/*
-              tar -cJf "${name}-${{ steps.tag.outputs.name }}.tar.xz" -C "$folder" .
-              tar -czf "${name}-${{ steps.tag.outputs.name }}.tar.gz" -C "$folder" .
+              zip -jq "${name}-${{ steps.tag.outputs.version }}.zip" "$folder"/*
+              tar -cJf "${name}-${{ steps.tag.outputs.version }}.tar.xz" -C "$folder" .
+              tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
             fi
           done
 
       - uses: softprops/action-gh-release@v2.2.1
         with:
           generate_release_notes: true
-          tag_name: ${{ steps.tag.outputs.name }}
+          tag_name: ${{ steps.tag.outputs.version }}
           files: |
-            js-*-*-${{ steps.tag.outputs.name }}.zip
-            js-*-*-${{ steps.tag.outputs.name }}.tar.xz
-            js-*-*-${{ steps.tag.outputs.name }}.tar.gz
+            js-*-${{ steps.tag.outputs.version }}.zip
+            js-*-${{ steps.tag.outputs.version }}.tar.xz
+            js-*-${{ steps.tag.outputs.version }}.tar.gz
           make_latest: true
