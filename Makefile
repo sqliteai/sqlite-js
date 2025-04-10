@@ -100,7 +100,7 @@ endif
 
 # Testing the extension
 test: $(TARGET)
-	sqlite3 ":memory:" -cmd ".bail on" ".load ./$(TARGET)" "SELECT 1;"
+	sqlite3 ":memory:" -cmd ".bail on" ".load ./$(TARGET)" "SELECT js_eval('console.log(\"hello, world\nToday is\", new Date().toLocaleDateString())');"
 
 # Help message
 help:
