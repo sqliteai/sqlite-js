@@ -5,6 +5,8 @@
 //  Created by Marco Bambini on 31/03/25.
 //
 
+#define SQLITE_JS_VERSION "1.1.0"
+
 #ifndef __SQLITEJS__
 #define __SQLITEJS__
 
