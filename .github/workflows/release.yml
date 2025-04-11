@@ -19,9 +19,9 @@ jobs:
           - os: ubuntu-latest
             arch: x86_64
             name: linux
-        #   - os: LinuxARM64
-        #     arch: arm64
-        #     name: linux
+          - os: LinuxARM64
+            arch: arm64
+            name: linux
           - os: macos-latest
             name: macos
           - os: windows-latest
