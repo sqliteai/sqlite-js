@@ -172,7 +172,7 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     
     globaljs_context *js = (globaljs_context *)sqlite3_malloc(sizeof(globaljs_context));
     if (!js) return NULL;
-    bzero(js, sizeof(globaljs_context));
+    memset(js, 0, sizeof(globaljs_context));
     
     rt = JS_NewRuntime();
     if (!rt) goto abort_init;
@@ -221,7 +221,7 @@ static functionjs_context *functionjs_init (globaljs_context *jsctx, const char 
     
     fctx = (functionjs_context *)sqlite3_malloc(sizeof(functionjs_context));
     if (!fctx) goto cleanup;
-    bzero(fctx, sizeof(functionjs_context));
+    memset(fctx, 0, sizeof(functionjs_context));
     
     if (init_code) {
         init_code_copy = sqlite_strdup(init_code);
