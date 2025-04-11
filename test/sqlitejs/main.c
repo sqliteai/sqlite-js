@@ -158,9 +158,9 @@ abort_test:
 // MARK: -
 
 int main (void) {
-    printf("SQLite-JS version: %s\n\n", sqlitejs_version());
+    printf("SQLite-JS version: %s (engine: %s)\n\n", sqlitejs_version(), quickjs_version());
     
-    int rc = 0;//test_execution();
+    int rc = test_execution();
     
     rc = test_serialization(DB_PATH, false, 1); // create and execute original implementations
     rc = test_serialization(DB_PATH, false, 2); // update functions previously registered in the js_functions table

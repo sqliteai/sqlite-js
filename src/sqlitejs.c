@@ -58,9 +58,6 @@ static JSValue sqlite_value_to_js (JSContext *ctx, sqlite3_value *value);
 
 #define SAFE_STRCMP(a,b)                (((a) != (b)) && ((a) == NULL || (b) == NULL || strcmp((a), (b)) != 0))
 
-#define SQLITEJS_VERSION                "1.1.0"
-static char gversion[128];
-
 // MARK: - RowSet -
 
 typedef struct {
@@ -302,53 +299,6 @@ static void functionjs_free (functionjs_context *fctx, bool complete) {
         if (fctx->value_code) sqlite3_free((void *)fctx->value_code);
         if (fctx->inverse_code) sqlite3_free((void *)fctx->inverse_code);
         sqlite3_free(fctx);
-    }
-}
-
-static void compute_version_string (void) {
-    const char *s1 = SQLITEJS_VERSION;
-    const char *s2 = JS_GetVersion();
-    
-    const char *p1 = s1;
-    const char *p2 = s2;
-    char *res_ptr = gversion;
-    bool first_component = true;
-    
-    while (*p1 != 0 || *p2 != 0) {
-        // extract a numeric component from each string
-        int num1 = 0, num2 = 0;
-        
-        // parse number from s1
-        while (*p1 != '\0' && isdigit((unsigned char)*p1)) {
-            num1 = num1 * 10 + (*p1 - '0');
-            p1++;
-        }
-        
-        // parse number from s2
-        while (*p2 != '\0' && isdigit((unsigned char)*p2)) {
-            num2 = num2 * 10 + (*p2 - '0');
-            p2++;
-        }
-        
-        // add the numbers
-        int sum = num1 + num2;
-        
-        // add a delimiter if this isn't the first component
-        if (!first_component) {
-            *res_ptr++ = '.';
-        } else {
-            first_component = false;
-        }
-        
-        // Convert sum to string and append to result
-        char temp[32];
-        sprintf(temp, "%d", sum);
-        strcpy(res_ptr, temp);
-        res_ptr += strlen(temp);
-        
-        // skip delimiters
-        if (*p1 == '.') p1++;
-        if (*p2 == '.') p2++;
     }
 }
 
@@ -785,8 +735,17 @@ static void js_execute_cleanup (void *xdata) {
 
 // MARK: - Functions -
 
-void js_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    sqlite3_result_text(context, gversion, -1, NULL);
+void js_version (sqlite3_context *context, bool internal_engine) {
+    sqlite3_result_text(context, (internal_engine) ? quickjs_version() : sqlitejs_version(), -1, NULL);
+}
+
+void js_version1 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    bool internal_engine = (sqlite3_value_int(argv[0]) != 0);
+    js_version(context, internal_engine);
+}
+
+void js_version0 (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    js_version(context, false);
 }
 
 bool js_add_to_table (sqlite3_context *context, const char *type, const char *name, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code) {
@@ -1098,8 +1057,11 @@ void js_init_table0 (sqlite3_context *context, int argc, sqlite3_value **argv) {
 // MARK: -
 
 const char *sqlitejs_version (void) {
-    if (gversion[0] == 0) compute_version_string();
-    return gversion;
+    return SQLITE_JS_VERSION;
+}
+
+const char *quickjs_version (void) {
+    return JS_GetVersion();
 }
 
 APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
@@ -1110,9 +1072,9 @@ APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_r
     globaljs_context *data = globaljs_init(db);
     if (!data) return SQLITE_NOMEM;
     
-    const char *f_name[] = {"js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob", "js_init_table", "js_init_table"};
-    const void *f_ptr[] = {js_version, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob, js_init_table0, js_init_table1};
-    int f_arg[] = {0, 2, 4, 6, 2, 1, 1, 1, 0, 1};
+    const char *f_name[] = {"js_version", "js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob", "js_init_table", "js_init_table"};
+    const void *f_ptr[] = {js_version0, js_version1, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob, js_init_table0, js_init_table1};
+    int f_arg[] = {0, 1, 2, 4, 6, 2, 1, 1, 1, 0, 1};
     
     size_t f_count = sizeof(f_name) / sizeof(const char *);
     for (size_t i=0; i<f_count; ++i) {
