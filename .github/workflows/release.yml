@@ -78,7 +78,7 @@ jobs:
         id: tag
         run: |
           FILE="src/sqlitejs.h"
-          VERSION=$(grep -oP '#define SQLITE_JS_VERSION "\K[^"]+' "$FILE")
+          VERSION=$(grep -oP '#define SQLITE_JS_VERSION\s+"\K[^"]+' "$FILE")
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "version=$VERSION" >> $GITHUB_OUTPUT
             exit 0
