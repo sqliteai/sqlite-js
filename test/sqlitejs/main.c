@@ -10,7 +10,7 @@
 #include "quickjs.h"
 #include "sqlitejs.h"
 
-#define DB_PATH         "/Users/marco/Desktop/functions.sqlite"
+#define DB_PATH         "js_functions.sqlite"
 
 static int print_results_callback(void *data, int argc, char **argv, char **names) {
     for (int i = 0; i < argc; i++) {
