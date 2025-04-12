@@ -19,11 +19,13 @@ SQLite-JS is a powerful extension that brings JavaScript capabilities to SQLite.
 
 ### Pre-built Binaries
 
-Download the appropriate pre-built binary for your platform:
+Download the appropriate pre-built binary for your platform from the official [Release](https://github.com/sqliteai/sqlite-js/releases) page:
 
-- Linux: `js.so`
-- macOS: `js.dylib`
-- Windows: `js.dll`
+- Linux: x86 and ARM
+- macOS: x86 and ARM
+- Windows: x86
+- Android
+- iOS
 
 ### Loading the Extension
 
