@@ -229,8 +229,8 @@ When used with [sqlite-sync](https://github.com/sqliteai/sqlite-sync/), user-def
 
 ### Usage
 ```sql
-SELECT js_init_table();            -- Create table if needed (no loading)
-SELECT js_init_table(true);        -- Create table and load all stored functions at startup
+SELECT js_init_table();         -- Create table if needed (no loading)
+SELECT js_init_table(1);        -- Create table and load all stored functions
 ```
 
 ## JavaScript Evaluation
