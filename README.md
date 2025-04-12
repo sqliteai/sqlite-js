@@ -10,8 +10,10 @@ SQLite-JS is a powerful extension that brings JavaScript capabilities to SQLite.
 - [Aggregate Functions](#aggregate-functions)
 - [Window Functions](#window-functions)
 - [Collation Sequences](#collation-sequences)
+- [Sync JavaScript Functions Across Devices](#syncing-across-devices)
 - [JavaScript Evaluation](#javascript-evaluation)
 - [Examples](#examples)
+- [Update Functions](#update-functions)
 - [Building from Source](#building-from-source)
 - [License](#license)
 
@@ -19,7 +21,7 @@ SQLite-JS is a powerful extension that brings JavaScript capabilities to SQLite.
 
 ### Pre-built Binaries
 
-Download the appropriate pre-built binary for your platform from the official [Release](https://github.com/sqliteai/sqlite-js/releases) page:
+Download the appropriate pre-built binary for your platform from the official [Releases](https://github.com/sqliteai/sqlite-js/releases) page:
 
 - Linux: x86 and ARM
 - macOS: x86 and ARM
@@ -221,6 +223,16 @@ SELECT js_create_collation('natural_nocase', 'function(a, b) {
 SELECT * FROM files ORDER BY name COLLATE natural_nocase;
 ```
 
+## Syncing Across Devices
+
+When used with [sqlite-sync](https://github.com/sqliteai/sqlite-sync/), user-defined functions created via sqlite-js are automatically replicated across the SQLite Cloud cluster, ensuring that all connected peers share the same logic and behavior — even offline. To enable automatic persistence and sync the special `js_init_table` function must be executed.
+
+### Usage
+```sql
+SELECT js_init_table();            -- Create table if needed (no loading)
+SELECT js_init_table(true);        -- Create table and load all stored functions at startup
+```
+
 ## JavaScript Evaluation
 
 The extension also provides a way to directly evaluate JavaScript code within SQLite queries.
@@ -319,6 +331,10 @@ SELECT name, score,
        percentile_rank(score) OVER (ORDER BY score) 
 FROM exam_results;
 ```
+
+## Update Functions
+
+Due to a constraint in [SQLite](https://www3.sqlite.org/src/info/cabab62bc10568d4), it is not possible to update or redefine a user-defined function using the same database connection that was used to initially register it. To modify an existing JavaScript function, the update must be performed through a separate database connection.
 
 ## Building from Source
 
