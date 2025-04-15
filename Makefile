@@ -1,5 +1,5 @@
 # Makefile for SQLite JavaScript Extension
-# Supports compilation for Linux, macOS, and Windows
+# Supports compilation for Linux, macOS, Windows, Android and iOS
 
 # Set default platform if not specified
 ifeq ($(OS),Windows_NT)
@@ -33,7 +33,6 @@ CFLAGS := -Wall -Wextra -fPIC -g -O2 -DQJS_BUILD_LIBC $(INCLUDES)
 ifeq ($(PLATFORM),windows)
     TARGET := $(DIST_DIR)/js.dll
     LDFLAGS := -shared
-    CC := gcc
     # Windows-specific flags
     CFLAGS += -D_WIN32
     # Create .def file for Windows
@@ -43,6 +42,28 @@ else ifeq ($(PLATFORM),macos)
     LDFLAGS := -dynamiclib -undefined dynamic_lookup
     # macOS-specific flags
     CFLAGS += -arch x86_64 -arch arm64
+else ifeq ($(PLATFORM),android)
+    # Use Android NDK's Clang compiler, the user should set the CC
+    # example CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
+    ifeq ($(filter %-clang,$(CC)),)
+        $(error "CC must be set to the Android NDK's Clang compiler")
+    endif
+    TARGET := $(DIST_DIR)/js.so
+    LDFLAGS := -shared
+    # Android-specific flags
+    CFLAGS += -D__ANDROID__
+else ifeq ($(PLATFORM),ios)
+    TARGET := $(DIST_DIR)/js.dylib
+    SDK := -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=11.0
+    LDFLAGS := -dynamiclib $(SDK)
+    # iOS-specific flags
+    CFLAGS += -arch arm64 $(SDK)
+else ifeq ($(PLATFORM),isim)
+    TARGET := $(DIST_DIR)/js.dylib
+    SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0
+    LDFLAGS := -dynamiclib $(SDK)
+    # iphonesimulator-specific flags
+    CFLAGS += -arch x86_64 -arch arm64 $(SDK)
 else # linux
     TARGET := $(DIST_DIR)/js.so
     LDFLAGS := -shared
@@ -112,6 +133,9 @@ help:
 	@echo "  linux (default on Linux)"
 	@echo "  macos (default on macOS)"
 	@echo "  windows (default on Windows)"
+	@echo "  android (needs CC to be set to Android NDK's Clang compiler)"
+	@echo "  ios (only on macOS)"
+	@echo "  isim (only on macOS)"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       - Build the extension (default)"
