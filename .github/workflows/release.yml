@@ -10,7 +10,7 @@ permissions:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    name: build${{ matrix.skip-test != true && ' and test' || ''}} for ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'isim' && matrix.name != 'ios' && ' + test' || ''}}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -18,26 +18,23 @@ jobs:
         include:
           - os: macos-latest
             name: isim
-            skip-test: true
             make: PLATFORM=isim
           - os: macos-latest
             name: ios
-            skip-test: true
             make: PLATFORM=ios
           - os: ubuntu-latest
             arch: arm64-v8a
             name: android
-            skip-test: true
             make:
               PLATFORM=android
               CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
           - os: ubuntu-latest
             arch: x86_64
             name: android
-            skip-test: true
             make:
               PLATFORM=android
               CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
+            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
           - os: ubuntu-latest
             arch: x86_64
             name: linux
@@ -71,8 +68,46 @@ jobs:
         if: matrix.name == 'macos'
         run: brew link sqlite --force
 
+      - name: android setup test environment
+        if: matrix.name == 'android' && matrix.arch != 'arm64-v8a'
+        run: |
+
+          echo "::group::enable kvm group perms"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          echo "::endgroup::"
+
+          echo "::group::download and build sqlite3 without SQLITE_OMIT_LOAD_EXTENSION"
+          curl -O ${{ matrix.sqlite-amalgamation-zip }}
+          unzip sqlite-amalgamation-*.zip
+          export ${{ matrix.make }}
+          $CC sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
+          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
+          echo "::endgroup::"
+
+          echo "::group::prepare the test script"
+          cat > commands.sh << EOF
+            mv -f /data/local/tmp/sqlite3 /system/xbin
+            cd /data/local/tmp
+            $(make test -n)
+          EOF
+          echo "::endgroup::"
+
+      - name: android test sqlite-js
+        if: matrix.name == 'android' && matrix.arch != 'arm64-v8a'
+        uses: reactivecircus/android-emulator-runner@v2.34.0
+        with:
+          api-level: 26
+          arch: ${{ matrix.arch }}
+          script: |
+            adb root
+            adb remount
+            adb push ${{ github.workspace }}/. /data/local/tmp/
+            adb shell "sh /data/local/tmp/commands.sh"
+
       - name: test sqlite-js
-        if: matrix.skip-test != true
+        if: matrix.name == 'linux' || matrix.name == 'macos' || matrix.name == 'windows'
         run: make test
 
       - uses: actions/upload-artifact@v4.6.2

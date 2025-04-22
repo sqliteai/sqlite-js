@@ -49,7 +49,7 @@ else ifeq ($(PLATFORM),android)
         $(error "CC must be set to the Android NDK's Clang compiler")
     endif
     TARGET := $(DIST_DIR)/js.so
-    LDFLAGS := -shared
+    LDFLAGS := -shared -lm
     # Android-specific flags
     CFLAGS += -D__ANDROID__
 else ifeq ($(PLATFORM),ios)
