@@ -7,7 +7,6 @@
 
 #include <stdio.h>
 #include "sqlite3.h"
-#include "quickjs.h"
 #include "sqlitejs.h"
 
 #define DB_PATH         "js_functions.sqlite"
@@ -33,8 +32,11 @@ int test_serialization (const char *db_path, bool load_functions, int nstep) {
     int rc = sqlite3_open(db_path, &db);
     if (rc != SQLITE_OK) goto abort_test;
     
-    // manually load extension
-    rc = sqlite3_js_init(db, NULL, NULL);
+    // enable load extension
+    rc = sqlite3_enable_load_extension(db, 1);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    rc = db_exec(db, "SELECT load_extension('./dist/js');");
     if (rc != SQLITE_OK) goto abort_test;
     
     rc = db_exec(db, (load_functions) ? "SELECT js_init_table(1);" : "SELECT js_init_table();");
@@ -67,8 +69,11 @@ int test_execution (void) {
     int rc = sqlite3_open(":memory:", &db);
     if (rc != SQLITE_OK) goto abort_test;
     
-    // manually load extension
-    rc = sqlite3_js_init(db, NULL, NULL);
+    // enable load extension
+    rc = sqlite3_enable_load_extension(db, 1);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    rc = db_exec(db, "SELECT load_extension('./dist/js');");
     if (rc != SQLITE_OK) goto abort_test;
     
     // context
