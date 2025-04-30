@@ -33,8 +33,6 @@ CFLAGS := -Wall -Wextra -fPIC -g -O2 -DQJS_BUILD_LIBC $(INCLUDES)
 ifeq ($(PLATFORM),windows)
     TARGET := $(DIST_DIR)/js.dll
     LDFLAGS := -shared
-    # Windows-specific flags
-    CFLAGS += -D_WIN32
     # Create .def file for Windows
     DEF_FILE := $(BUILD_DIR)/js.def
 else ifeq ($(PLATFORM),macos)
@@ -99,6 +97,8 @@ ifeq ($(PLATFORM),windows)
 	@echo "LIBRARY js.dll" > $@
 	@echo "EXPORTS" >> $@
 	@echo "    sqlite3_js_init" >> $@
+	@echo "    sqlitejs_version" >> $@
+	@echo "    quickjs_version" >> $@
 endif
 
 # Clean up
@@ -119,9 +119,24 @@ else # linux
 	cp $(TARGET) $(DESTDIR)/usr/local/lib/sqlite3/
 endif
 
+# Test source files
+TEST_FILES := test/main.c
+
+# Test target files
+ifeq ($(PLATFORM),windows)
+	TEST_TARGET := $(patsubst %.c,$(DIST_DIR)/%.exe,$(notdir $(TEST_FILES)))
+else
+	TEST_TARGET := $(patsubst %.c,$(DIST_DIR)/%,$(notdir $(TEST_FILES)))
+endif
+
+# Compile test target
+$(TEST_TARGET): $(TEST_FILES) $(TARGET)
+	$(CC) $(INCLUDES) $^ -lm -o $@ libs/sqlite3.c -DSQLITE_CORE
+
 # Testing the extension
-test: $(TARGET)
-	sqlite3 ":memory:" -cmd ".bail on" ".load ./$(TARGET)" "SELECT js_eval('console.log(\"hello, world\nToday is\", new Date().toLocaleDateString())');"
+test: $(TARGET) $(TEST_TARGET)
+	sqlite3 ":memory:" -cmd ".bail on" ".load ./$<" "SELECT js_eval('console.log(\"hello, world\nToday is\", new Date().toLocaleDateString())');"
+	./$(TEST_TARGET)
 
 # Help message
 help:
