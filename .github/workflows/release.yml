@@ -87,10 +87,11 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::prepare the test script"
+          make test CC=$CC PLATFORM=$PLATFORM || echo "It should fail. Running remaining commands in the emulator"
           cat > commands.sh << EOF
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
-            $(make test -n)
+            $(make test CC=$CC PLATFORM=$PLATFORM -n)
           EOF
           echo "::endgroup::"
 
