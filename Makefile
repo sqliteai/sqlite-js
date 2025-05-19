@@ -37,7 +37,7 @@ ifeq ($(PLATFORM),windows)
     DEF_FILE := $(BUILD_DIR)/js.def
 else ifeq ($(PLATFORM),macos)
     TARGET := $(DIST_DIR)/js.dylib
-    LDFLAGS := -dynamiclib -undefined dynamic_lookup
+    LDFLAGS := -arch x86_64 -arch arm64 -dynamiclib -undefined dynamic_lookup
     # macOS-specific flags
     CFLAGS += -arch x86_64 -arch arm64
 else ifeq ($(PLATFORM),android)
@@ -59,7 +59,7 @@ else ifeq ($(PLATFORM),ios)
 else ifeq ($(PLATFORM),isim)
     TARGET := $(DIST_DIR)/js.dylib
     SDK := -isysroot $(shell xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=11.0
-    LDFLAGS := -dynamiclib $(SDK)
+    LDFLAGS := -arch x86_64 -arch arm64 -dynamiclib $(SDK)
     # iphonesimulator-specific flags
     CFLAGS += -arch x86_64 -arch arm64 $(SDK)
 else # linux
