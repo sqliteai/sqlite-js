@@ -205,8 +205,10 @@ abort_init:
 static void globaljs_free (globaljs_context *js) {
     if (!js) return;
     
-    if (js->runtime) JS_FreeRuntime(js->runtime);
+    // order matters
+    if (js->runtime) js_std_free_handlers(js->runtime);
     if (js->context) JS_FreeContext(js->context);
+    if (js->runtime) JS_FreeRuntime(js->runtime);
     sqlite3_free(js);
 }
 
