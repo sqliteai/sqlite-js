@@ -139,7 +139,12 @@ jobs:
           FILE="src/sqlitejs.h"
           VERSION=$(grep -oP '#define SQLITE_JS_VERSION\s+"\K[^"]+' "$FILE")
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            LATEST=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.name')
+            if [[ "$VERSION" != "$LATEST" ]]; then
+              echo "version=$VERSION" >> $GITHUB_OUTPUT
+            else
+              echo "::warning file=src/sqlitejs.h::To release a new version, please update the SQLITE_JS_VERSION in src/sqlitejs.h to be different than the latest $LATEST"
+            fi
             exit 0
           fi
           echo "❌ SQLITE_JS_VERSION not found in sqlitejs.h"
@@ -157,6 +162,7 @@ jobs:
           done
 
       - uses: softprops/action-gh-release@v2.2.1
+        if: steps.tag.outputs.version != ''
         with:
           generate_release_notes: true
           tag_name: ${{ steps.tag.outputs.version }}
