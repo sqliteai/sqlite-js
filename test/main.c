@@ -32,12 +32,16 @@ int test_serialization (const char *db_path, bool load_functions, int nstep) {
     int rc = sqlite3_open(db_path, &db);
     if (rc != SQLITE_OK) goto abort_test;
     
+    #if JS_LOAD_EMBEDDED
+    rc = sqlite3_js_init(db, NULL, NULL);
+    #else
     // enable load extension
     rc = sqlite3_enable_load_extension(db, 1);
     if (rc != SQLITE_OK) goto abort_test;
 
     rc = db_exec(db, "SELECT load_extension('./dist/js');");
     if (rc != SQLITE_OK) goto abort_test;
+    #endif
     
     rc = db_exec(db, (load_functions) ? "SELECT js_init_table(1);" : "SELECT js_init_table();");
     if (rc != SQLITE_OK) goto abort_test;
@@ -69,12 +73,16 @@ int test_execution (void) {
     int rc = sqlite3_open(":memory:", &db);
     if (rc != SQLITE_OK) goto abort_test;
     
+    #if JS_LOAD_EMBEDDED
+    rc = sqlite3_js_init(db, NULL, NULL);
+    #else
     // enable load extension
     rc = sqlite3_enable_load_extension(db, 1);
     if (rc != SQLITE_OK) goto abort_test;
     
     rc = db_exec(db, "SELECT load_extension('./dist/js');");
     if (rc != SQLITE_OK) goto abort_test;
+    #endif
     
     // context
     printf("Testing context\n");
