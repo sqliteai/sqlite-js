@@ -70,7 +70,7 @@ SELECT js_create_scalar('function_name', 'function_code');
 
 ```sql
 -- Create a custom function to calculate age from birth date
-SELECT js_create_scalar('age', 'function(args) {
+SELECT js_create_scalar('age', '(function(args) {
   const birthDate = new Date(args[0]);
   const today = new Date();
   let age = today.getFullYear() - birthDate.getFullYear();
@@ -79,7 +79,7 @@ SELECT js_create_scalar('age', 'function(args) {
     age--;
   }
   return age;
-}');
+})');
 
 -- Use the function
 SELECT name, age(birth_date) FROM people;
@@ -111,12 +111,12 @@ SELECT js_create_aggregate('median',
   'values = [];',
   
   -- Step code: collect values from each row
-  'function(args) {
+  '(function(args) {
     values.push(args[0]);
-  }',
+  })',
   
   -- Final code: calculate the median
-  'function() {
+  '(function() {
     values.sort((a, b) => a - b);
     const mid = Math.floor(values.length / 2);
     if (values.length % 2 === 0) {
@@ -124,7 +124,7 @@ SELECT js_create_aggregate('median',
     } else {
       return values[mid];
     }
-  }'
+  })'
 );
 
 -- Use the function
@@ -159,24 +159,24 @@ SELECT js_create_window('moving_avg',
   'sum = 0; count = 0;',
   
   -- Step code: process each row
-  'function(args) {
+  '(function(args) {
     sum += args[0];
     count++;
-  }',
+  })',
   
   -- Final code: not needed for this example
-  'function() { }',
+  '(function() { })',
   
   -- Value code: return current average
-  'function() {
+  '(function() {
     return count > 0 ? sum / count : null;
-  }',
+  })',
   
   -- Inverse code: remove a value from the window
-  'function(args) {
+  '(function(args) {
     sum -= args[0];
     count--;
-  }'
+  })'
 );
 
 -- Use the function
@@ -203,7 +203,7 @@ SELECT js_create_collation('collation_name', 'collation_function');
 
 ```sql
 -- Create a case-insensitive natural sort collation
-SELECT js_create_collation('natural_nocase', 'function(a, b) {
+SELECT js_create_collation('natural_nocase', '(function(a, b) {
   // Extract numbers for natural comparison
   const splitA = a.toLowerCase().split(/(\d+)/);
   const splitB = b.toLowerCase().split(/(\d+)/);
@@ -217,7 +217,7 @@ SELECT js_create_collation('natural_nocase', 'function(a, b) {
     }
   }
   return splitA.length - splitB.length;
-}');
+})');
 
 -- Use the collation
 SELECT * FROM files ORDER BY name COLLATE natural_nocase;
@@ -263,10 +263,10 @@ SELECT js_eval('new Date(1629381600000).toLocaleDateString()');
 
 ```sql
 -- Create a function to extract domain from email
-SELECT js_create_scalar('get_domain', 'function(args) {
+SELECT js_create_scalar('get_domain', '(function(args) {
   const email = args[0];
   return email.split("@")[1] || null;
-}');
+})');
 
 -- Use it in a query
 SELECT email, get_domain(email) AS domain FROM users;
@@ -279,18 +279,18 @@ SELECT email, get_domain(email) AS domain FROM users;
 SELECT js_create_aggregate('stddev',
   'sum = 0; sumSq = 0; count = 0;',
   
-  'function(args) {
+  '(function(args) {
     const val = args[0];
     sum += val;
     sumSq += val * val;
     count++;
-  }',
+  })',
   
-  'function() {
+  '(function() {
     if (count < 2) return null;
     const variance = (sumSq - (sum * sum) / count) / (count - 1);
     return Math.sqrt(variance);
-  }'
+  })'
 );
 
 -- Use it in a query
@@ -304,26 +304,26 @@ SELECT department, stddev(salary) FROM employees GROUP BY department;
 SELECT js_create_window('percentile_rank',
   'values = [];',
   
-  'function(args) {
+  '(function(args) {
     values.push(args[0]);
-  }',
+  })',
   
-  'function() {
+  '(function() {
     values.sort((a, b) => a - b);
-  }',
+  })',
   
-  'function() {
+  '(function() {
     const current = values[values.length - 1];
     const rank = values.indexOf(current);
     return (rank / (values.length - 1)) * 100;
-  }',
+  })',
   
-  'function(args) {
+  '(function(args) {
     const index = values.indexOf(args[0]);
     if (index !== -1) {
       values.splice(index, 1);
     }
-  }'
+  })'
 );
 
 -- Use it in a query
