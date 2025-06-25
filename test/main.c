@@ -86,6 +86,7 @@ int test_execution (void) {
     
     // context
     printf("Testing context\n");
+    
     rc = db_exec(db, "SELECT js_eval('x = 100;');");
     rc = db_exec(db, "SELECT js_eval('x = x*2;');");
     rc = db_exec(db, "SELECT js_eval('function test1(n) {return n*x;}');");
@@ -161,6 +162,7 @@ int test_execution (void) {
     
     rc = db_exec(db, "SELECT x, sumint(y) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum_y FROM t3 ORDER BY x;");
     
+    rc = db_exec(db, "SELECT x, sumint(y) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum_y FROM t3 ORDER BY x;");
     
 abort_test:
     if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db));
@@ -172,12 +174,20 @@ abort_test:
 
 int main (void) {
     printf("SQLite-JS version: %s (engine: %s)\n\n", sqlitejs_version(), quickjs_version());
-    
+
     int rc = test_execution();
-    
     rc = test_serialization(DB_PATH, false, 1); // create and execute original implementations
     rc = test_serialization(DB_PATH, false, 2); // update functions previously registered in the js_functions table
     rc = test_serialization(DB_PATH, true,  3); // load the new implementations
+    
+    sqlite3_int64 current = 0;
+    sqlite3_int64 highwater = 0;
+    bool reset = false;
+    rc = sqlite3_status64(SQLITE_STATUS_MEMORY_USED, &current, &highwater, reset);
+    if (current > 0) {
+        printf("memory leak: %lld\n", current);
+        return 1;
+    }
     
     return rc;
 }
