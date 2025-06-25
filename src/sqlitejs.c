@@ -28,24 +28,28 @@ typedef struct {
     JSContext           *context;
     sqlite3             *db;
     JSClassID           rowSetClassID;
+    int                 ref_count;
 } globaljs_context;
 
 typedef struct {
-    bool                inited;
-    
     globaljs_context    *js_ctx;        // never to release
-    JSContext           *agg_ctx;       // to release (windows and aggregate functions)
     
     const char          *init_code;     // release only if complete (aggregate functions only)
     const char          *step_code;     // release only if complete (scalar, collation, windows and aggregate functions)
     const char          *final_code;    // release only if complete (windows and aggregate functions)
     const char          *value_code;    // release only if complete (window functions only)
     const char          *inverse_code;  // release only if complete (window functions only)
+    
+    JSValue             func;      // to release (scalar, collation)
+} functionjs_context;
+
+typedef struct {
+    JSContext           *context;       // to release (windows and aggregate functions)
     JSValue             step_func;      // to release (scalar, collation, windows and aggregate functions)
     JSValue             final_func;     // to release (windows and aggregate functions)
     JSValue             value_func;     // to release (window functions only)
     JSValue             inverse_func;   // to release (window functions only)
-} functionjs_context;
+} functionjs_aggregate_context;
 
 static char *sqlite_strdup (const char *str);
 static bool js_global_init (JSContext *ctx, globaljs_context *js);
@@ -157,7 +161,8 @@ static JSValue js_rowset_to_array(JSContext *ctx, JSValueConst this_val, int arg
 }
 
 static void js_rowset_finalizer(JSRuntime *rt, JSValue val) {
-    rowset *rs = (rowset *)JS_VALUE_GET_PTR(val);
+    globaljs_context *js = JS_GetRuntimeOpaque(rt);
+    rowset *rs = (rowset *)JS_GetOpaque(val, js->rowSetClassID);
     if (!rs) return;
     
     if (rs->vm) sqlite3_finalize(rs->vm);
@@ -189,8 +194,10 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     js->db = db;
     js->runtime = rt;
     js->context = ctx;
+    js->ref_count = 0;
     
     JS_SetContextOpaque(ctx, js);
+    JS_SetRuntimeOpaque(rt, js);
     js_global_init(ctx, js);
     
     return js;
@@ -204,12 +211,21 @@ abort_init:
 
 static void globaljs_free (globaljs_context *js) {
     if (!js) return;
-    
+
     // order matters
     if (js->runtime) js_std_free_handlers(js->runtime);
     if (js->context) JS_FreeContext(js->context);
     if (js->runtime) JS_FreeRuntime(js->runtime);
     sqlite3_free(js);
+}
+
+void globaljs_dec_and_free_if_needed (void *ptr) {
+    if (!ptr) return;
+    globaljs_context *js = (globaljs_context *)ptr;
+    
+    // Decrement reference count and free global context if needed
+    js->ref_count--;
+    if (js->ref_count == 0) globaljs_free(js);
 }
 
 static functionjs_context *functionjs_init (globaljs_context *jsctx, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code) {
@@ -250,9 +266,8 @@ static functionjs_context *functionjs_init (globaljs_context *jsctx, const char 
         if (!inverse_code_copy) goto cleanup;
     }
     
-    fctx->inited = false;
     fctx->js_ctx = jsctx;
-    fctx->agg_ctx = NULL;
+    jsctx->ref_count++;  // Increment reference count
     
     fctx->init_code = init_code_copy;
     fctx->step_code = step_code_copy;
@@ -260,11 +275,8 @@ static functionjs_context *functionjs_init (globaljs_context *jsctx, const char 
     fctx->value_code = value_code_copy;
     fctx->inverse_code = inverse_code_copy;
     
-    fctx->step_func = JS_NULL;
-    fctx->final_func = JS_NULL;
-    fctx->value_func = JS_NULL;
-    fctx->inverse_func = JS_NULL;
-    
+    fctx->func = JS_NULL;
+
     return fctx;
     
 cleanup:
@@ -277,31 +289,39 @@ cleanup:
     return NULL;
 }
 
-static void functionjs_free (functionjs_context *fctx, bool complete) {
-    if (!fctx) return;
-    JSContext *context = (fctx->agg_ctx) ? fctx->agg_ctx : fctx->js_ctx->context;
+static void functionjs_aggregate_free (functionjs_aggregate_context *agg_ctx) {
+    if (!agg_ctx) return;
+    
+    JSContext *context = agg_ctx->context;
     
     // always to release
-    if (!JS_IsNull(fctx->step_func)) JS_FreeValue(context, fctx->step_func);
-    if (!JS_IsNull(fctx->final_func)) JS_FreeValue(context, fctx->final_func);
-    if (!JS_IsNull(fctx->value_func)) JS_FreeValue(context, fctx->value_func);
-    if (!JS_IsNull(fctx->inverse_func)) JS_FreeValue(context, fctx->inverse_func);
-    if (fctx->agg_ctx) JS_FreeContext(fctx->agg_ctx);
+    if (!JS_IsNull(agg_ctx->step_func)) JS_FreeValue(context, agg_ctx->step_func);
+    if (!JS_IsNull(agg_ctx->final_func)) JS_FreeValue(context, agg_ctx->final_func);
+    if (!JS_IsNull(agg_ctx->value_func)) JS_FreeValue(context, agg_ctx->value_func);
+    if (!JS_IsNull(agg_ctx->inverse_func)) JS_FreeValue(context, agg_ctx->inverse_func);
+    JS_FreeContext(context);
     
-    fctx->step_func = JS_NULL;
-    fctx->final_func = JS_NULL;
-    fctx->value_func = JS_NULL;
-    fctx->inverse_func = JS_NULL;
-    fctx->agg_ctx = NULL;
+    agg_ctx->step_func = JS_NULL;
+    agg_ctx->final_func = JS_NULL;
+    agg_ctx->value_func = JS_NULL;
+    agg_ctx->inverse_func = JS_NULL;
+    agg_ctx->context = NULL;
+}
+
+static void functionjs_free (functionjs_context *fctx) {
+    if (!fctx) return;
+    globaljs_context *js = fctx->js_ctx;
     
-    if (complete) {
-        if (fctx->init_code) sqlite3_free((void *)fctx->init_code);
-        if (fctx->step_code) sqlite3_free((void *)fctx->step_code);
-        if (fctx->final_code) sqlite3_free((void *)fctx->final_code);
-        if (fctx->value_code) sqlite3_free((void *)fctx->value_code);
-        if (fctx->inverse_code) sqlite3_free((void *)fctx->inverse_code);
-        sqlite3_free(fctx);
-    }
+    if (!JS_IsNull(fctx->func)) JS_FreeValue(js->context, fctx->func);
+    
+    if (fctx->init_code) sqlite3_free((void *)fctx->init_code);
+    if (fctx->step_code) sqlite3_free((void *)fctx->step_code);
+    if (fctx->final_code) sqlite3_free((void *)fctx->final_code);
+    if (fctx->value_code) sqlite3_free((void *)fctx->value_code);
+    if (fctx->inverse_code) sqlite3_free((void *)fctx->inverse_code);
+    sqlite3_free(fctx);
+    
+    globaljs_dec_and_free_if_needed(js);
 }
 
 // MARK: - Utils -
@@ -468,17 +488,17 @@ static void js_error_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
     if (!JS_IsNull(exception)) JS_FreeValue(js_ctx, exception);
 }
 
-static bool js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSValue value) {
+static void js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSValue value) {
     // check for exceptions first and convert it to a proper error message (if any)
     if (JS_IsException(value)) {
         js_error_to_sqlite(context, js_ctx, value, NULL);
-        return false;
+        return;
     }
     
     // check for null or undefined
     if (JS_IsNull(value) || JS_IsUndefined(value)) {
         sqlite3_result_null(context);
-        return false;
+        return;
     }
     
     // handle numbers
@@ -496,13 +516,13 @@ static bool js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
             // handle BigInt if needed
             sqlite3_result_null(context);
         }
-        return false;
+        return;
     }
     
     // handle booleans
     if (JS_IsBool(value)) {
         sqlite3_result_int(context, JS_ToBool(js_ctx, value));
-        return false;
+        return;
     }
     
     // handle strings
@@ -515,20 +535,28 @@ static bool js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
         } else {
             sqlite3_result_error(context, "Failed to convert JS string", -1);
         }
-        return false;
+        return;
     }
     
     if (JS_IsObject(value)) {
         sqlite3_result_null(context);
-        return true;
+        return;
     }
     
     // fallback for unsupported types
     sqlite3_result_error(context, "Unsupported JS value type", -1);
-    return false;
 }
 
-static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, functionjs_context *fctx, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code) {
+static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, functionjs_aggregate_context *agg_ctx, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code) {
+    bool result = false;
+    
+    if (agg_ctx) {
+        // initialize aggregate context functions with null values
+        agg_ctx->step_func = JS_NULL;
+        agg_ctx->final_func = JS_NULL;
+        agg_ctx->value_func = JS_NULL;
+        agg_ctx->inverse_func = JS_NULL;
+    }
     
     // create a separate context for testing purpose
     JSContext *ctx = JS_NewContext(js->runtime);
@@ -573,23 +601,25 @@ static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, 
     }
     
     // when here I am sure everything is OK
-    if (fctx) {
+    if (agg_ctx) {
         // setup a proper function aggregate context
-        fctx->agg_ctx = ctx;
-        fctx->step_func = step_func;
-        fctx->final_func = final_func;
-        fctx->value_func = value_func;
-        fctx->inverse_func = inverse_func;
-        fctx->inited = true;
+        agg_ctx->context = ctx;
+        agg_ctx->step_func = step_func;
+        agg_ctx->final_func = final_func;
+        agg_ctx->value_func = value_func;
+        agg_ctx->inverse_func = inverse_func;
+        return true;
     }
-    return true;
+    
+    result = true;
     
 cleanup:
-    if (!JS_IsFunction(ctx, step_func)) js_error_to_sqlite(context, ctx, step_func, "JavaScript step code must evaluate to a function in the form (function(args){ your_code_here })");
-    else if (!JS_IsFunction(ctx, final_func)) js_error_to_sqlite(context, ctx, final_func, "JavaScript final code must evaluate to a function in the form (function(){ your_code_here })");
-    else if (!JS_IsFunction(ctx, value_func)) js_error_to_sqlite(context, ctx, final_func, "JavaScript value code must evaluate to a function in the form (function(){ your_code_here })");
-    else if (!JS_IsFunction(ctx, inverse_func)) js_error_to_sqlite(context, ctx, step_func, "JavaScript inverse code must evaluate to a function in the form (function(args){ your_code_here })");
-    
+    if (!result) {
+        if (!JS_IsFunction(ctx, step_func)) js_error_to_sqlite(context, ctx, step_func, "JavaScript step code must evaluate to a function in the form (function(args){ your_code_here })");
+        else if (!JS_IsFunction(ctx, final_func)) js_error_to_sqlite(context, ctx, final_func, "JavaScript final code must evaluate to a function in the form (function(){ your_code_here })");
+        else if (!JS_IsFunction(ctx, value_func)) js_error_to_sqlite(context, ctx, final_func, "JavaScript value code must evaluate to a function in the form (function(){ your_code_here })");
+        else if (!JS_IsFunction(ctx, inverse_func)) js_error_to_sqlite(context, ctx, step_func, "JavaScript inverse code must evaluate to a function in the form (function(args){ your_code_here })");
+    }
     
     JS_FreeValue(ctx, step_func);
     JS_FreeValue(ctx, final_func);
@@ -597,7 +627,7 @@ cleanup:
     JS_FreeValue(ctx, inverse_func);
     
     JS_FreeContext(ctx);
-    return false;
+    return result;
 }
 
 static JSValue sqlite_value_to_js (JSContext *ctx, sqlite3_value *value) {
@@ -648,12 +678,7 @@ static char *sqlite_strdup (const char *str) {
 
 // MARK: - Execution -
 
-static void js_execute_commong (sqlite3_context *context, int nvalues, sqlite3_value **values, JSValue func, JSValue this_obj, bool return_value) {
-    functionjs_context *fctx = (functionjs_context *)sqlite3_user_data(context);
-    globaljs_context *js = fctx->js_ctx;
-    
-    JSContext *js_context = (fctx->agg_ctx) ? fctx->agg_ctx : js->context;
-    
+static void js_execute_common (sqlite3_context *context, JSContext *js_context, int nvalues, sqlite3_value **values, JSValue func, JSValue this_obj, bool return_value) {
     // create JS array for arguments
     JSValue args = (values) ? JS_NewArray(js_context) : JS_NULL;
     for (int i=0; i<nvalues; ++i) {
@@ -666,59 +691,58 @@ static void js_execute_commong (sqlite3_context *context, int nvalues, sqlite3_v
     JSValue result = JS_Call(js_context, func, this_obj, (values) ? 1 : 0, (values) ? args_val : NULL);
     JS_FreeValue(js_context, args);
     
-    bool is_object = false;
-    if (return_value) is_object = js_value_to_sqlite(context, js_context, result);
-    if (!is_object) JS_FreeValue(js_context, result);
+    if (return_value) js_value_to_sqlite(context, js_context, result);
+    JS_FreeValue(js_context, result);
 }
 
 static void js_execute_scalar (sqlite3_context *context, int nvalues, sqlite3_value **values) {
     functionjs_context *fctx = (functionjs_context *)sqlite3_user_data(context);
-    js_execute_commong(context, nvalues, values, fctx->step_func, JS_UNDEFINED, true);
+    js_execute_common(context, fctx->js_ctx->context, nvalues, values, fctx->func, JS_UNDEFINED, true);
 }
 
 static void js_execute_step (sqlite3_context *context, int nvalues, sqlite3_value **values) {
     functionjs_context *fctx = (functionjs_context *)sqlite3_user_data(context);
     globaljs_context *js = fctx->js_ctx;
+    functionjs_aggregate_context *agg_ctx = sqlite3_aggregate_context(context, sizeof(*agg_ctx));
     
     // if there is an init code then create a separate aggregate context
     // to avoid shared state corruption across parallel aggregates
-    if (!fctx->inited) {
+    if (!agg_ctx->context) {
         // set up a new isolated environment for this aggregation
-        if (js_setup_aggregate(context, js, fctx, fctx->init_code, fctx->step_code, fctx->final_code, fctx->value_code, fctx->inverse_code) == false) return;
-        fctx->inited = true;
+        if (js_setup_aggregate(context, js, agg_ctx, fctx->init_code, fctx->step_code, fctx->final_code, fctx->value_code, fctx->inverse_code) == false) return;
     }
-    
-    js_execute_commong(context, nvalues, values, fctx->step_func, JS_UNDEFINED, false);
+
+    js_execute_common(context, agg_ctx->context, nvalues, values, agg_ctx->step_func, JS_UNDEFINED, false);
 }
 
 static void js_execute_value (sqlite3_context *context) {
-    functionjs_context *fctx = (functionjs_context *)sqlite3_user_data(context);
-    js_execute_commong(context, 0, NULL, fctx->value_func, JS_UNDEFINED, true);
+    functionjs_aggregate_context *agg_ctx = sqlite3_aggregate_context(context, sizeof(*agg_ctx));
+    js_execute_common(context, agg_ctx->context, 0, NULL, agg_ctx->value_func, JS_UNDEFINED, true);
 }
 
 static void js_execute_inverse (sqlite3_context *context, int nvalues, sqlite3_value **values) {
-    functionjs_context *fctx = (functionjs_context *)sqlite3_user_data(context);
-    js_execute_commong(context, nvalues, values, fctx->inverse_func, JS_UNDEFINED, false);
+    functionjs_aggregate_context *agg_ctx = sqlite3_aggregate_context(context, sizeof(*agg_ctx));
+    js_execute_common(context, agg_ctx->context, nvalues, values, agg_ctx->inverse_func, JS_UNDEFINED, false);
 }
 
 static void js_execute_final (sqlite3_context *context) {
-    functionjs_context *fctx = (functionjs_context *)sqlite3_user_data(context);
-    js_execute_commong(context, 0, NULL, fctx->final_func, JS_UNDEFINED, true);
-    functionjs_free(fctx, false);
-    fctx->inited = false;
+    functionjs_aggregate_context *agg_ctx = sqlite3_aggregate_context(context, sizeof(*agg_ctx));
+
+    js_execute_common(context, agg_ctx->context, 0, NULL, agg_ctx->final_func, JS_UNDEFINED, true);
+    functionjs_aggregate_free(agg_ctx);
 }
 
 static int js_execute_collation (void *xdata, int len1, const void *v1, int len2, const void *v2) {
     functionjs_context *fctx = (functionjs_context *)xdata;
     globaljs_context *js = fctx->js_ctx;
-    
+
     // create arguments
     JSValue val1 = (v1) ? JS_NewStringLen(js->context, (const char *)v1, (size_t)len1) : JS_NULL;
     JSValue val2 = (v2) ? JS_NewStringLen(js->context, (const char *)v2, (size_t)len2) : JS_NULL;
     JSValue args[] = {val1, val2};
     
     // call the JavaScript function with arguments
-    JSValue result = JS_Call(js->context, fctx->step_func, JS_UNDEFINED, 2, args);
+    JSValue result = JS_Call(js->context, fctx->func, JS_UNDEFINED, 2, args);
     JS_FreeValue(js->context, val1);
     JS_FreeValue(js->context, val2);
     
@@ -732,7 +756,7 @@ static int js_execute_collation (void *xdata, int len1, const void *v1, int len2
 
 static void js_execute_cleanup (void *xdata) {
     if (!xdata) return;
-    functionjs_free((functionjs_context *)xdata, true);
+    functionjs_free((functionjs_context *)xdata);
 }
 
 // MARK: - Functions -
@@ -854,10 +878,10 @@ bool js_create_common (sqlite3_context *context, const char *type, const char *n
         if (!JS_IsFunction(js->context, func)) {
             const char *err_msg = (is_scalar) ? "JavaScript code must evaluate to a function in the form (function(args){ your_code_here })" : "JavaScript code must evaluate to a function in the form (function(str1, str2){ your_code_here })";
             js_error_to_sqlite(context, js->context, func, err_msg);
-            functionjs_free(fctx, true);
+            functionjs_free(fctx);
             return false;
         }
-        fctx->step_func = func;
+        fctx->func = func;
     }
     
     int rc = SQLITE_OK;
@@ -952,8 +976,8 @@ void js_eval (sqlite3_context *context, int argc, sqlite3_value **argv) {
     }
     
     JSValue value = JS_Eval(data->context, code, strlen(code), NULL, JS_EVAL_TYPE_GLOBAL);
-    bool is_object = js_value_to_sqlite(context, data->context, value);
-    if (!is_object) JS_FreeValue(data->context, value);
+    js_value_to_sqlite(context, data->context, value);
+    JS_FreeValue(data->context, value);
 }
 
 static void js_load_fromfile (sqlite3_context *context, int argc, sqlite3_value **argv, bool is_blob) {
@@ -1071,8 +1095,8 @@ APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_r
     SQLITE_EXTENSION_INIT2(pApi);
     #endif
     
-    globaljs_context *data = globaljs_init(db);
-    if (!data) return SQLITE_NOMEM;
+    globaljs_context *js = globaljs_init(db);
+    if (!js) return SQLITE_NOMEM;
     
     const char *f_name[] = {"js_version", "js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob", "js_init_table", "js_init_table"};
     const void *f_ptr[] = {js_version0, js_version1, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob, js_init_table0, js_init_table1};
@@ -1080,7 +1104,13 @@ APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_r
     
     size_t f_count = sizeof(f_name) / sizeof(const char *);
     for (size_t i=0; i<f_count; ++i) {
-        int rc = sqlite3_create_function_v2(db, f_name[i], f_arg[i], SQLITE_UTF8, (void *)data, f_ptr[i], NULL, NULL, NULL);
+        void (*xDestroy)(void *) = NULL;
+        if (i == f_count-1) {
+            js->ref_count++;
+            xDestroy = globaljs_dec_and_free_if_needed;
+        }
+        
+        int rc = sqlite3_create_function_v2(db, f_name[i], f_arg[i], SQLITE_UTF8, (void *)js, f_ptr[i], NULL, NULL, xDestroy);
         if (rc != SQLITE_OK) {
             if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating function %s: %s", f_name[i], sqlite3_errmsg(db));
             return rc;
