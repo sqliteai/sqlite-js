@@ -1081,6 +1081,13 @@ void js_init_table0 (sqlite3_context *context, int argc, sqlite3_value **argv) {
     js_init_table(context, false);
 }
 
+void js_set_max_stack_size (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
+
+    int stack_size = sqlite3_value_int(argv[0]);
+    JS_SetMaxStackSize(js->runtime, stack_size);
+}
+
 // MARK: -
 
 const char *sqlitejs_version (void) {
@@ -1099,9 +1106,9 @@ APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_r
     globaljs_context *js = globaljs_init(db);
     if (!js) return SQLITE_NOMEM;
     
-    const char *f_name[] = {"js_version", "js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob", "js_init_table", "js_init_table"};
-    const void *f_ptr[] = {js_version0, js_version1, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob, js_init_table0, js_init_table1};
-    int f_arg[] = {0, 1, 2, 4, 6, 2, 1, 1, 1, 0, 1};
+    const char *f_name[] = {"js_version", "js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob", "js_init_table", "js_init_table", "js_set_max_stack_size"};
+    const void *f_ptr[] = {js_version0, js_version1, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob, js_init_table0, js_init_table1, js_set_max_stack_size};
+    int f_arg[] = {0, 1, 2, 4, 6, 2, 1, 1, 1, 0, 1, 1};
     
     size_t f_count = sizeof(f_name) / sizeof(const char *);
     for (size_t i=0; i<f_count; ++i) {
