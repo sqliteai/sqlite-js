@@ -8,8 +8,14 @@
 #include <stdio.h>
 #include "sqlite3.h"
 #include "sqlitejs.h"
+#include <pthread.h>
 
-#define DB_PATH         "js_functions.sqlite"
+#define DB_PATH                 "js_functions.sqlite"
+
+#define TEST_THREAD_NTHREADS    1000
+#define TEST_THREAD_FIRST_INIT  0
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 static int print_results_callback(void *data, int argc, char **argv, char **names) {
     for (int i = 0; i < argc; i++) {
@@ -104,6 +110,8 @@ int test_execution (void) {
     rc = db_exec(db, "SELECT Cos(123), cos(12.3);");
     rc = db_exec(db, "SELECT js_create_scalar('Sin', '(function(args){return Math.sin(args[0]);})')");
     rc = db_exec(db, "SELECT Sin(123), sin(12.3);");
+    rc = db_exec(db, "SELECT js_create_scalar('f-2', '(function(args){return args[0]*10;})')");
+    rc = db_exec(db, "SELECT [f-2](2);");
     
     // aggregate
     printf("\nTesting js_create_aggregate\n");
@@ -170,6 +178,150 @@ abort_test:
     return rc;
 }
 
+void *test_thread_init(void *ptr) {
+    sqlite3 **ppdb = (sqlite3 **)ptr;
+    int rc;
+    
+    // printf("test_thread_init\n");
+
+    pthread_mutex_lock(&mutex);
+    rc = sqlite3_open(":memory:", ppdb);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    sqlite3 *db= *ppdb;
+    
+    #if JS_LOAD_EMBEDDED
+    rc = sqlite3_js_init(db, NULL, NULL);
+    #else
+    // enable load extension
+    rc = sqlite3_enable_load_extension(db, 1);
+    if (rc != SQLITE_OK) goto finalize;
+    
+    rc = db_exec(db, "SELECT load_extension('./dist/js');");
+    if (rc != SQLITE_OK) goto finalize;
+    #endif
+        
+    rc = db_exec(db, "SELECT js_set_max_stack_size(0)");
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = db_exec(db, "SELECT js_create_scalar('x10', '(function(args){return args[0]*10;})')");
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = db_exec(db, "SELECT x10(2);");
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = db_exec(db, "SELECT js_eval('136*10');");
+    if (rc != SQLITE_OK) goto finalize;
+    
+finalize:
+    pthread_cond_signal(&cond); // Signal consumer
+    pthread_mutex_unlock(&mutex);
+    
+    // printf("test_thread_init return %d\n", rc);
+    return (void*)(intptr_t)rc;
+}
+
+void *test_thread_sleep(void *ptr) {
+    sqlite3_sleep(5000);
+    return (void*)(intptr_t)0;
+}
+
+void *test_thread_worker(void *ptr) {
+    sqlite3 **ppdb = (sqlite3 **)ptr;
+    sqlite3 *db;
+    
+    pthread_mutex_lock(&mutex);
+    while (!(db = *ppdb)) {
+        pthread_cond_wait(&cond, &mutex); // Wait for data
+    }
+    
+    // printf("test_thread_worker\n");
+
+    int rc = db_exec(db, "SELECT x10(2);");
+    if (rc != SQLITE_OK) goto finalize;
+    
+    rc = db_exec(db, "SELECT js_eval('136*10');");
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = db_exec(db, "SELECT js_create_scalar('x20', '(function(args){return args[0]*20;})')");
+    if (rc != SQLITE_OK) goto finalize;
+
+    rc = db_exec(db, "SELECT x20(2);");
+    if (rc != SQLITE_OK) goto finalize;
+    
+finalize:
+    pthread_mutex_unlock(&mutex);
+
+    // printf("test_thread_1 return %d\n", rc);
+    return (void*)(intptr_t)rc;
+}
+
+int test_thread (void) {
+    sqlite3 *db = NULL;
+    int rc;
+    int iret;
+    
+    // Create the a separated thread
+    pthread_t thread1, thread_init, thread_sleep[TEST_THREAD_NTHREADS];
+    
+#if TEST_THREAD_FIRST_INIT
+    iret = pthread_create(&thread_init, NULL, test_thread_init, (void*) &db);
+    if (iret) {
+        fprintf(stderr, "Error - pthread_create() init return code: %d\n", iret);
+        return 1;
+    }
+#endif
+    
+    iret = pthread_create(&thread1, NULL, test_thread_worker, (void*) &db);
+    if (iret) {
+        fprintf(stderr, "Error - pthread_create() 1 return code: %d\n", iret);
+        return 1;
+    }
+    
+    
+    for (int i=0; i<TEST_THREAD_NTHREADS; i++) {
+        iret = pthread_create(&thread_sleep[i], NULL, test_thread_sleep, (void*) &db);
+        if (iret) {
+            fprintf(stderr, "Error - pthread_create() %d return code: %d\n", i, iret);
+            return 1;
+        }
+    }
+   
+#if TEST_THREAD_FIRST_INIT == 0
+    iret = pthread_create(&thread_init, NULL, test_thread_init, (void*) &db);
+    if (iret) {
+        fprintf(stderr, "Error - pthread_create() init return code: %d\n", iret);
+        return 1;
+    }
+    
+#endif
+    
+    // Wait for the threads to complete before the main thread continues
+    void *thread_1_rc;
+    void *thread_init_rc;
+    pthread_join(thread1, &thread_1_rc);
+    pthread_join(thread_init, &thread_init_rc);
+    rc = (int)(intptr_t)thread_1_rc;
+    // printf("Thread 1 returns: %d\n", rc);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = (int)(intptr_t)thread_init_rc;
+    // printf("Thread init returns: %d\n", rc);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    for (int i=0; i<TEST_THREAD_NTHREADS; i++) {
+        void *thread_sleep_rc;
+        pthread_join(thread_sleep[i], &thread_sleep_rc);
+        rc = (int)(intptr_t)thread_sleep_rc;
+        // printf("Thread %d returns: %d\n", i, rc);
+        if (rc != SQLITE_OK) goto abort_test;
+    }
+        
+abort_test:
+    if (rc != SQLITE_OK) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: -
 
 int main (void) {
@@ -179,7 +331,8 @@ int main (void) {
     rc = test_serialization(DB_PATH, false, 1); // create and execute original implementations
     rc = test_serialization(DB_PATH, false, 2); // update functions previously registered in the js_functions table
     rc = test_serialization(DB_PATH, true,  3); // load the new implementations
-    
+    rc = test_thread();
+
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;
     bool reset = false;
