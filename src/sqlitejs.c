@@ -469,7 +469,7 @@ static void js_error_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
     JSValue exception = JS_NULL;
     
     if (JS_IsException(value)) {
-        JSValue exception = JS_GetException(js_ctx);
+        exception = JS_GetException(js_ctx);
         if (JS_IsObject(exception)) {
             JSValue message = JS_GetPropertyStr(js_ctx, exception, "message");
             if (!JS_IsException(message) && JS_IsString(message)) {
@@ -878,6 +878,7 @@ bool js_create_common (sqlite3_context *context, const char *type, const char *n
         if (!JS_IsFunction(js->context, func)) {
             const char *err_msg = (is_scalar) ? "JavaScript code must evaluate to a function in the form (function(args){ your_code_here })" : "JavaScript code must evaluate to a function in the form (function(str1, str2){ your_code_here })";
             js_error_to_sqlite(context, js->context, func, err_msg);
+            JS_FreeValue(js->context, func);
             functionjs_free(fctx);
             return false;
         }
