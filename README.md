@@ -14,6 +14,7 @@
 - [JavaScript Evaluation](#javascript-evaluation)
 - [Examples](#examples)
 - [Update Functions](#update-functions)
+- [Function Naming Rules](#function-naming-rules)
 - [Building from Source](#building-from-source)
 - [License](#license)
 
@@ -63,7 +64,7 @@ SELECT js_create_scalar('function_name', 'function_code');
 
 ### Parameters
 
-- **function_name**: The name of your custom function
+- **function_name**: The name of your custom function (see [Function Naming Rules](#function-naming-rules))
 - **function_code**: JavaScript code that defines your function. Must be in the form `function(args) { /* your code here */ }`
 
 ### Example
@@ -97,7 +98,7 @@ SELECT js_create_aggregate('function_name', 'init_code', 'step_code', 'final_cod
 
 ### Parameters
 
-- **function_name**: The name of your custom aggregate function
+- **function_name**: The name of your custom aggregate function (see [Function Naming Rules](#function-naming-rules))
 - **init_code**: JavaScript code that initializes variables for the aggregation
 - **step_code**: JavaScript code that processes each row. Must be in the form `function(args) { /* your code here */ }`
 - **final_code**: JavaScript code that computes the final result. Must be in the form `function() { /* your code here */ }`
@@ -143,7 +144,7 @@ SELECT js_create_window('function_name', 'init_code', 'step_code', 'final_code',
 
 ### Parameters
 
-- **function_name**: The name of your custom window function
+- **function_name**: The name of your custom window function (see [Function Naming Rules](#function-naming-rules))
 - **init_code**: JavaScript code that initializes variables
 - **step_code**: JavaScript code that processes each row. Must be in the form `function(args) { /* your code here */ }`
 - **final_code**: JavaScript code that computes the final result. Must be in the form `function() { /* your code here */ }`
@@ -196,7 +197,7 @@ SELECT js_create_collation('collation_name', 'collation_function');
 
 ### Parameters
 
-- **collation_name**: The name of your custom collation
+- **collation_name**: The name of your custom collation (see [Function Naming Rules](#function-naming-rules))
 - **collation_function**: JavaScript code that compares two strings. Must return a negative number if the first string is less than the second, zero if they are equal, or a positive number if the first string is greater than the second.
 
 ### Example
@@ -335,6 +336,36 @@ FROM exam_results;
 ## Update Functions
 
 Due to a constraint in [SQLite](https://www3.sqlite.org/src/info/cabab62bc10568d4), it is not possible to update or redefine a user-defined function using the same database connection that was used to initially register it. To modify an existing JavaScript function, the update must be performed through a separate database connection.
+
+## Function Naming Rules
+
+Function names must comply with SQLite identifier rules and must be unique within the database and its schema.
+
+### Unquoted Identifiers
+These must follow typical SQL naming conventions:
+- Must begin with a letter (A-Z or a-z) or an underscore `_`
+- May contain letters, digits (0-9), and underscores `_`
+- Are case-insensitive
+- Cannot match a reserved keyword unless quoted
+
+**Examples:**
+- Valid: `identifier1`, `_temp`, `user_name`
+- Invalid: `123abc`, `select`, `identifier-name`
+
+### Quoted Identifiers
+SQLite supports delimited identifiers, which allow almost any character, as long as the identifier is properly quoted.
+
+You can use:
+- Double quotes: `"identifier name"`
+- Square brackets (Microsoft-style): `[identifier name]`
+- Backticks (MySQL-style): `` `identifier name` ``
+
+These quoting styles are interchangeable in SQLite. Inside a quoted identifier, you can include:
+- Spaces: `"my column"`
+- Special characters: `"name@domain"`, `"price€"`, `"weird!name"`
+- Reserved SQL keywords: `"select"`, `"group"`
+
+Quoted identifiers are case-sensitive.
 
 ## Building from Source
 
