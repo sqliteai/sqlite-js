@@ -131,7 +131,7 @@ endif
 
 # Compile test target
 $(TEST_TARGET): $(TEST_FILES) $(TARGET)
-	$(CC) $(INCLUDES) $^ -o $@ libs/sqlite3.c -DSQLITE_CORE
+	$(CC) $(INCLUDES) $^ -lm -o $@ libs/sqlite3.c -DSQLITE_CORE
 
 # Testing the extension
 test: $(TARGET) $(TEST_TARGET)
