@@ -64,7 +64,7 @@ else ifeq ($(PLATFORM),isim)
     CFLAGS += -arch x86_64 -arch arm64 $(SDK)
 else # linux
     TARGET := $(DIST_DIR)/js.so
-    LDFLAGS := -shared
+    LDFLAGS := -lm -shared
 endif
 
 # Object files
@@ -78,7 +78,7 @@ all: $(TARGET)
 
 # Link the final target
 $(TARGET): $(OBJ_FILES) $(DEF_FILE)
-	$(CC) $(LDFLAGS) -o $@ $^
+	$(CC) -o $@ $^ $(LDFLAGS)
 ifeq ($(PLATFORM),windows)
 	# Generate import library for Windows
 	dlltool -D $@ -d $(DEF_FILE) -l $(DIST_DIR)/js.lib
@@ -131,7 +131,7 @@ endif
 
 # Compile test target
 $(TEST_TARGET): $(TEST_FILES) $(TARGET)
-	$(CC) $(INCLUDES) $^ -lm -o $@ libs/sqlite3.c -DSQLITE_CORE
+	$(CC) $(INCLUDES) $^ -o $@ libs/sqlite3.c -DSQLITE_CORE
 
 # Testing the extension
 test: $(TARGET) $(TEST_TARGET)
