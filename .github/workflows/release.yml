@@ -8,63 +8,83 @@ permissions:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'isim' && matrix.name != 'ios' && ' + test' || ''}}
+    container: ${{ matrix.container && matrix.container || '' }}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && ' + test' || ''}}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            name: isim
-            make: PLATFORM=isim
-          - os: macos-latest
-            name: ios
-            make: PLATFORM=ios
-          - os: ubuntu-latest
-            arch: arm64-v8a
-            name: android
-            make:
-              PLATFORM=android
-              CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
-          - os: ubuntu-latest
-            arch: x86_64
-            name: android
-            make:
-              PLATFORM=android
-              CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
-            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             arch: x86_64
             name: linux
-          - os: LinuxARM64
+          - os: ubuntu-22.04-arm
             arch: arm64
             name: linux
-          - os: macos-latest
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux-musl
+            container: alpine:latest
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux-musl
+          - os: macos-15
             name: macos
-          - os: windows-latest
+          - os: windows-2022
             arch: x86_64
             name: windows
+          - os: ubuntu-22.04
+            arch: arm64-v8a
+            name: android
+            make: PLATFORM=android ARCH=arm64-v8a
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: android
+            make: PLATFORM=android ARCH=x86_64
+            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
+          - os: macos-15
+            name: ios
+            make: PLATFORM=ios
+          - os: macos-15
+            name: ios-sim
+            make: PLATFORM=ios-sim
+          - os: macos-15
+            name: apple-xcframework
+            make: xcframework
 
     defaults:
       run:
-        shell: bash
-    env:
-      MAKEFLAGS: -j 8
+        shell: ${{ matrix.container && 'sh' || 'bash' }}
 
     steps:
 
       - uses: actions/checkout@v4.2.2
 
-      - name: build sqlite-js
-        run: make ${{ matrix.make && matrix.make || ''}}
-
-      - name: windows install sqlite3
-        if: matrix.os == 'windows-latest'
+      - name: windows install dependencies
+        if: matrix.name == 'windows'
         run: choco install sqlite -y
 
-      - name: macos install sqlite3 without SQLITE_OMIT_LOAD_EXTENSION
+      - name: macos install dependencies
         if: matrix.name == 'macos'
         run: brew link sqlite --force
+
+      - name: linux-musl x86_64 install dependencies
+        if: matrix.name == 'linux-musl' && matrix.arch == 'x86_64'
+        run: apk update && apk add --no-cache gcc make sqlite musl-dev linux-headers
+
+      - name: linux-musl arm64 setup container
+        if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
+        run: |
+          docker run -d --name alpine \
+            --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            alpine:latest \
+            tail -f /dev/null
+          docker exec alpine sh -c "apk update && apk add --no-cache gcc make sqlite musl-dev linux-headers"
+
+      - name: build sqlite-js
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
 
       - name: android setup test environment
         if: matrix.name == 'android' && matrix.arch != 'arm64-v8a'
@@ -80,16 +100,16 @@ jobs:
           curl -O ${{ matrix.sqlite-amalgamation-zip }}
           unzip sqlite-amalgamation-*.zip
           export ${{ matrix.make }}
-          $CC sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
+          $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
           rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
           echo "::endgroup::"
 
           echo "::group::prepare the test script"
-          make test CC=$CC PLATFORM=$PLATFORM || echo "It should fail. Running remaining commands in the emulator"
+          make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
           cat > commands.sh << EOF
             mv -f /data/local/tmp/sqlite3 /system/xbin
             cd /data/local/tmp
-            $(make test CC=$CC PLATFORM=$PLATFORM -n)
+            $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
           EOF
           echo "::endgroup::"
 
@@ -106,8 +126,8 @@ jobs:
             adb shell "sh /data/local/tmp/commands.sh"
 
       - name: test sqlite-js
-        if: matrix.name == 'linux' || matrix.name == 'macos' || matrix.name == 'windows'
-        run: make test
+        if: contains(matrix.name, 'linux') || matrix.name == 'windows' || matrix.name == 'macos'
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
 
       - uses: actions/upload-artifact@v4.6.2
         with:
@@ -116,7 +136,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     name: release
     needs: build
     if: github.ref == 'refs/heads/main'
@@ -154,8 +174,7 @@ jobs:
           for folder in "artifacts"/*; do
             if [ -d "$folder" ]; then
               name=$(basename "$folder")
-              zip -jq "${name}-${{ steps.tag.outputs.version }}.zip" "$folder"/*
-              tar -cJf "${name}-${{ steps.tag.outputs.version }}.tar.xz" -C "$folder" .
+              (cd "$folder" && zip -rq "../../${name}-${{ steps.tag.outputs.version }}.zip" .)
               tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
             fi
           done
@@ -167,6 +186,5 @@ jobs:
           tag_name: ${{ steps.tag.outputs.version }}
           files: |
             js-*-${{ steps.tag.outputs.version }}.zip
-            js-*-${{ steps.tag.outputs.version }}.tar.xz
             js-*-${{ steps.tag.outputs.version }}.tar.gz
           make_latest: true
