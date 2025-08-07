@@ -92,6 +92,7 @@ $(shell mkdir -p $(BUILD_DIR) $(DIST_DIR))
 
 # Main target
 all: $(TARGET)
+extension: $(TARGET)
 
 # Link the final target
 $(TARGET): $(OBJ_FILES) $(DEF_FILE)
@@ -229,4 +230,4 @@ help:
 	@echo "  test		- Test the extension"
 	@echo "  help		- Display this help message"
 
-.PHONY: all clean install test help version xcframework
+.PHONY: all extension clean install test help version xcframework
