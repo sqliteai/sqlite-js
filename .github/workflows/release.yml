@@ -1,6 +1,7 @@
-name: release sqlite-js
+name: build, test and release sqlite-js
 on:
   push:
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -86,6 +87,35 @@ jobs:
       - name: build sqlite-js
         run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
 
+      - name: create keychain for codesign
+        if: matrix.os == 'macos-15'
+        run: |
+          echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > certificate.p12
+          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+          security import certificate.p12 -k build.keychain -P "${{ secrets.CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+
+      - name: codesign dylib
+        if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework'
+        run: codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/js.dylib
+
+      - name: codesign and notarize xcframework
+        if: matrix.name == 'apple-xcframework'
+        run: |
+          find dist/js.xcframework -name "*.framework" -exec echo "Signing: {}" \; -exec codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime {} \; # Sign each individual framework FIRST
+          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/js.xcframework # Then sign the xcframework wrapper
+          ditto -c -k --keepParent dist/js.xcframework dist/js.xcframework.zip
+          xcrun notarytool submit dist/js.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          rm dist/js.xcframework.zip
+
+      - name: cleanup keychain for codesign
+        if: matrix.os == 'macos-15'
+        run: |
+          rm certificate.p12
+          security delete-keychain build.keychain
+
       - name: android setup test environment
         if: matrix.name == 'android' && matrix.arch != 'arm64-v8a'
         run: |
@@ -101,6 +131,7 @@ jobs:
           unzip sqlite-amalgamation-*.zip
           export ${{ matrix.make }}
           $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
+          # remove unused folders to save up space
           rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
           echo "::endgroup::"
 
@@ -130,6 +161,7 @@ jobs:
         run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
 
       - uses: actions/upload-artifact@v4.6.2
+        if: always()
         with:
           name: js-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
           path: dist/js.*
@@ -155,11 +187,10 @@ jobs:
       - name: release tag version from sqlitejs.h
         id: tag
         run: |
-          FILE="src/sqlitejs.h"
-          VERSION=$(grep -oP '#define SQLITE_JS_VERSION\s+"\K[^"]+' "$FILE")
+          VERSION=$(make version)
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             LATEST=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.name')
-            if [[ "$VERSION" != "$LATEST" ]]; then
+            if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
               echo "version=$VERSION" >> $GITHUB_OUTPUT
             else
               echo "::warning file=src/sqlitejs.h::To release a new version, please update the SQLITE_JS_VERSION in src/sqlitejs.h to be different than the latest $LATEST"
@@ -174,8 +205,10 @@ jobs:
           for folder in "artifacts"/*; do
             if [ -d "$folder" ]; then
               name=$(basename "$folder")
+              if [[ "$name" != "js-apple-xcframework" ]]; then
+                tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
+              fi
               (cd "$folder" && zip -rq "../../${name}-${{ steps.tag.outputs.version }}.zip" .)
-              tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
             fi
           done
 
