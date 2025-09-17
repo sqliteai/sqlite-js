@@ -30,6 +30,29 @@ Download the appropriate pre-built binary for your platform from the official [R
 - Android
 - iOS
 
+### Swift Package
+
+You can [add this repository as a package dependency to your Swift project](https://developer.apple.com/documentation/xcode/adding-package-dependencies-to-your-app#Add-a-package-dependency). After adding the package, you'll need to set up SQLite with extension loading by following steps 4 and 5 of [this guide](https://github.com/sqliteai/sqlite-extensions-guide/blob/main/platforms/ios.md#4-set-up-sqlite-with-extension-loading).
+
+Here's an example of how to use the package:
+```swift
+import js
+
+...
+
+var db: OpaquePointer?
+sqlite3_open(":memory:", &db)
+sqlite3_enable_load_extension(db, 1)
+var errMsg: UnsafeMutablePointer<Int8>? = nil
+sqlite3_load_extension(db, js.path, nil, &errMsg)
+var stmt: OpaquePointer?
+sqlite3_prepare_v2(db, "SELECT js_version()", -1, &stmt, nil)
+defer { sqlite3_finalize(stmt) }
+sqlite3_step(stmt)
+log("js_version(): \(String(cString: sqlite3_column_text(stmt, 0)))")
+sqlite3_close(db)
+```
+
 ### Loading the Extension
 
 ```sql
