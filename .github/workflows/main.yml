@@ -97,9 +97,13 @@ jobs:
           security import certificate.p12 -k build.keychain -P "${{ secrets.CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
 
-      - name: codesign dylib
+      - name: codesign and notarize dylib
         if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework'
-        run: codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/js.dylib
+        run: |
+          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/js.dylib
+          ditto -c -k dist/js.dylib dist/js.zip
+          xcrun notarytool submit dist/js.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          rm dist/js.zip
 
       - name: codesign and notarize xcframework
         if: matrix.name == 'apple-xcframework'
