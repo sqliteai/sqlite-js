@@ -1,9 +1,29 @@
-.DS_Store
+# Build artifacts
+build/
+/dist
+.build
+*.a
+*.sqlite
+
+# iOS/macOS
 *.xcworkspacedata
 *.xcuserstate
 *.xcbkptlist
 *.plist
-/build
-/dist
-*.sqlite
-.build
+
+# Android
+.gradle/
+*.aar
+local.properties
+jniLibs/
+*.apk
+*.ap_
+*.dex
+
+# IDE
+.vscode
+.idea/
+*.iml
+
+# System
+.DS_Store

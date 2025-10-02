@@ -216,6 +216,17 @@ $(DIST_DIR)/%.xcframework: $(LIB_NAMES)
 
 xcframework: $(DIST_DIR)/js.xcframework
 
+AAR_ARM = packages/android/src/main/jniLibs/arm64-v8a/
+AAR_X86 = packages/android/src/main/jniLibs/x86_64/
+aar:
+	mkdir -p $(AAR_ARM) $(AAR_X86)
+	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=arm64-v8a
+	mv $(DIST_DIR)/js.so $(AAR_ARM)
+	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=x86_64
+	mv $(DIST_DIR)/js.so $(AAR_X86)
+	cd packages/android && ./gradlew clean assembleRelease
+	cp packages/android/build/outputs/aar/android-release.aar $(DIST_DIR)/js.aar
+
 version:
 	@echo $(shell sed -n 's/^#define SQLITE_JS_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/sqlitejs.h)
 
@@ -234,10 +245,12 @@ help:
 	@echo "  ios-sim (only on macOS)"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all		- Build the extension (default)"
-	@echo "  clean		- Remove built files"
-	@echo "  install	- Install the extension"
-	@echo "  test		- Test the extension"
-	@echo "  help		- Display this help message"
+	@echo "  all			- Build the extension (default)"
+	@echo "  clean			- Remove built files"
+	@echo "  install		- Install the extension"
+	@echo "  test			- Test the extension"
+	@echo "  help			- Display this help message"
+	@echo "  xcframework	- Build the Apple XCFramework"
+	@echo "  aar			- Build the Android AAR package"
 
-.PHONY: all extension clean install test help version xcframework
+.PHONY: all extension clean install test help version xcframework aar

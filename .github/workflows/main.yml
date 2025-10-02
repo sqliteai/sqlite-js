@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container && matrix.container || '' }}
-    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && ' + test' || ''}}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar' && ' + test' || ''}}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -52,6 +52,9 @@ jobs:
           - os: macos-15
             name: apple-xcframework
             make: xcframework
+          - os: ubuntu-22.04
+            name: android-aar
+            make: aar
 
     defaults:
       run:
@@ -60,6 +63,13 @@ jobs:
     steps:
 
       - uses: actions/checkout@v4.2.2
+
+      - name: android setup java
+        if: matrix.name == 'android-aar'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: windows install dependencies
         if: matrix.name == 'windows'
@@ -188,12 +198,65 @@ jobs:
         with:
           path: artifacts
 
+      - name: zip artifacts
+        run: |
+          VERSION=$(make version)
+          for folder in "artifacts"/*; do
+            if [ -d "$folder" ]; then
+              name=$(basename "$folder")
+              if [[ "$name" != "js-apple-xcframework" && "$name" != "js-android-aar" ]]; then
+                tar -czf "${name}-${VERSION}.tar.gz" -C "$folder" .
+              fi
+              if [[ "$name" != "js-android-aar" ]]; then
+                (cd "$folder" && zip -rq "../../${name}-${VERSION}.zip" .)
+              else
+                cp "$folder"/*.aar "${name}-${VERSION}.aar"
+              fi
+            fi
+          done
+
       - name: release tag version from sqlitejs.h
         id: tag
         run: |
           VERSION=$(make version)
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            LATEST=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.name')
+            LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest)
+            LATEST=$(echo "$LATEST_RELEASE" | jq -r '.name')
+            # Check artifact sizes against previous release
+            if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
+              echo "Checking artifact sizes against previous release: $LATEST"
+              FAILED=0
+              for artifact in js-*-${VERSION}.*; do
+                if [ ! -f "$artifact" ]; then
+                  continue
+                fi
+                # Get current artifact size
+                NEW_SIZE=$(stat -c%s "$artifact" 2>/dev/null || stat -f%z "$artifact")
+                # Get artifact name for previous release
+                ARTIFACT_NAME=$(echo "$artifact" | sed "s/${VERSION}/${LATEST}/")
+                # Get previous artifact size from GitHub API
+                OLD_SIZE=$(echo "$LATEST_RELEASE" | jq -r ".assets[] | select(.name == \"$(basename "$ARTIFACT_NAME")\") | .size")
+                if [ -z "$OLD_SIZE" ] || [ "$OLD_SIZE" = "null" ]; then
+                  echo "⚠️  Previous artifact not found: $(basename "$ARTIFACT_NAME"), skipping comparison"
+                  continue
+                fi
+                # Calculate percentage increase
+                INCREASE=$(awk "BEGIN {printf \"%.2f\", (($NEW_SIZE - $OLD_SIZE) / $OLD_SIZE) * 100}")
+                echo "📦 $artifact: $OLD_SIZE → $NEW_SIZE bytes (${INCREASE}% change)"
+                # Check if increase is more than 5%
+                if (( $(echo "$INCREASE > 5" | bc -l) )); then
+                  echo "❌ ERROR: $artifact size increased by ${INCREASE}% (limit: 5%)"
+                  FAILED=1
+                fi
+              done
+              if [ $FAILED -eq 1 ]; then
+                echo ""
+                echo "❌ One or more artifacts exceeded the 5% size increase limit"
+                exit 1
+              fi
+              echo "✅ All artifacts within 5% size increase limit"
+            fi
+
             if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
               echo "version=$VERSION" >> $GITHUB_OUTPUT
             else
@@ -203,25 +266,21 @@ jobs:
           fi
           echo "❌ SQLITE_JS_VERSION not found in sqlitejs.h"
           exit 1
-          
-      - name: zip artifacts
-        run: |
-          for folder in "artifacts"/*; do
-            if [ -d "$folder" ]; then
-              name=$(basename "$folder")
-              if [[ "$name" != "js-apple-xcframework" ]]; then
-                tar -czf "${name}-${{ steps.tag.outputs.version }}.tar.gz" -C "$folder" .
-              fi
-              (cd "$folder" && zip -rq "../../${name}-${{ steps.tag.outputs.version }}.zip" .)
-            fi
-          done
+
+      - uses: actions/setup-java@v4
+        if: steps.tag.outputs.version != ''
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: release android aar to maven central
+        if: steps.tag.outputs.version != ''
+        run: make aar && cd packages/android && ./gradlew publishAggregationToCentralPortal -PSIGNING_KEY="${{ secrets.SIGNING_KEY }}" -PSIGNING_PASSWORD="${{ secrets.SIGNING_PASSWORD }}" -PSONATYPE_USERNAME="${{ secrets.MAVEN_CENTRAL_USERNAME }}" -PSONATYPE_PASSWORD="${{ secrets.MAVEN_CENTRAL_TOKEN }}" -PVERSION="${{ steps.tag.outputs.version }}"
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
         with:
           generate_release_notes: true
           tag_name: ${{ steps.tag.outputs.version }}
-          files: |
-            js-*-${{ steps.tag.outputs.version }}.zip
-            js-*-${{ steps.tag.outputs.version }}.tar.gz
+          files: js-*-${{ steps.tag.outputs.version }}.*
           make_latest: true
