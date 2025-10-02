@@ -79,8 +79,8 @@ dependencies {
     // Use requery's SQLite instead of Android's built-in SQLite to support loading custom extensions
     implementation 'com.github.requery:sqlite-android:3.49.0'
     // Both packages below are identical - use either one
-    implementation 'ai.sqlite:js:0.9.32' // Maven Central
-    // implementation 'com.github.sqliteai:sqlite-js:0.9.32' // JitPack (alternative)
+    implementation 'ai.sqlite:js:1.1.11' // Maven Central
+    // implementation 'com.github.sqliteai:sqlite-js:1.1.11' // JitPack (alternative)
 }
 ```
 
@@ -98,8 +98,8 @@ dependencies {
     // Use requery's SQLite instead of Android's built-in SQLite to support loading custom extensions
     implementation("com.github.requery:sqlite-android:3.49.0")
     // Both packages below are identical - use either one
-    implementation("ai.sqlite:js:0.9.32") // Maven Central
-    // implementation("com.github.sqliteai:sqlite-js:0.9.32") // JitPack (alternative)
+    implementation("ai.sqlite:js:1.1.11") // Maven Central
+    // implementation("com.github.sqliteai:sqlite-js:1.1.11") // JitPack (alternative)
 }
 ```
 
