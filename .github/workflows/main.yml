@@ -275,7 +275,7 @@ jobs:
 
       - name: release android aar to maven central
         if: steps.tag.outputs.version != ''
-        run: make aar && cd packages/android && ./gradlew publishAggregationToCentralPortal -PSIGNING_KEY="${{ secrets.SIGNING_KEY }}" -PSIGNING_PASSWORD="${{ secrets.SIGNING_PASSWORD }}" -PSONATYPE_USERNAME="${{ secrets.MAVEN_CENTRAL_USERNAME }}" -PSONATYPE_PASSWORD="${{ secrets.MAVEN_CENTRAL_TOKEN }}" -PVERSION="${{ steps.tag.outputs.version }}"
+        run: cd packages/android && ./gradlew publishAggregationToCentralPortal -PSIGNING_KEY="${{ secrets.SIGNING_KEY }}" -PSIGNING_PASSWORD="${{ secrets.SIGNING_PASSWORD }}" -PSONATYPE_USERNAME="${{ secrets.MAVEN_CENTRAL_USERNAME }}" -PSONATYPE_PASSWORD="${{ secrets.MAVEN_CENTRAL_TOKEN }}" -PVERSION="${{ steps.tag.outputs.version }}" -PAAR_PATH="../../artifacts/js-android-aar/js.aar"
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''

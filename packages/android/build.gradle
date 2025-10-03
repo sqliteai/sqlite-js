@@ -60,7 +60,7 @@ afterEvaluate {
                 artifactId = 'js'
                 version = project.hasProperty('VERSION') ? project.VERSION : ['make', 'version'].execute(null, file('../..')).text.trim()
 
-                artifact("$buildDir/outputs/aar/android-release.aar")
+                artifact(project.hasProperty('AAR_PATH') ? project.AAR_PATH : "$buildDir/outputs/aar/android-release.aar")
 
                 // Maven Central metadata
                 pom {
