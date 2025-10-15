@@ -575,7 +575,10 @@ static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, 
         bool is_error = JS_IsException(result);
         if (is_error) js_error_to_sqlite(context, ctx, result, NULL);
         JS_FreeValue(ctx, result);
-        if (is_error) return false;
+        if (is_error) {
+            JS_FreeContext(ctx);
+            return false;
+        }
     }
     
     JSValue step_func = JS_NULL;
