@@ -228,6 +228,12 @@ int test_execution (void) {
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_query(db, "SELECT js_eval('test1(50);');", "10000");
     if (rc != SQLITE_OK) goto abort_test;
+    rc = (db_exec_v2(db, "SELECT js_eval('undefined_obj;');", false) == SQLITE_ERROR ? SQLITE_OK : SQLITE_ERROR);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = (db_exec_v2(db, "SELECT js_create_window('code_with_error', 'sum = 0; undefined_obj', '(function(args){sum += args[0];})', '(function(){return sum;})', '(function(){return sum;})', '(function(args){sum -= args[0];})');", false) == SQLITE_ERROR ? SQLITE_OK : SQLITE_ERROR);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = (db_exec_v2(db, "SELECT js_create_window('code_with_error_2', 'sum = 0;', '(function(args){sum += args[0;})', '(function(){return sum;})', '(function(){return sum;})', '(function(args){sum -= args[0];})');", false) == SQLITE_ERROR ? SQLITE_OK : SQLITE_ERROR);
+    if (rc != SQLITE_OK) goto abort_test;
     
     // eval
     DEBUGF("\nTesting js_eval\n");
