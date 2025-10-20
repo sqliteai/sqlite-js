@@ -1,0 +1,19 @@
+# Development and build files
+src/
+*.test.ts
+*.test.js
+tsconfig.json
+tsup.config.ts
+
+# Scripts (only for repo/CI)
+generate-platform-packages.js
+
+# Development files
+node_modules/
+package-lock.json
+coverage/
+*.log
+
+# Git
+.git/
+.gitignore

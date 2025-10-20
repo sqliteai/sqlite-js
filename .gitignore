@@ -1,6 +1,6 @@
 # Build artifacts
 build/
-/dist
+dist/
 .build
 *.a
 *.sqlite
@@ -20,10 +20,27 @@ jniLibs/
 *.ap_
 *.dex
 
+# Node.js
+node_modules/
+package-lock.json
+*.tsbuildinfo
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+packages/node/platform-packages/
+packages/node/test-artifacts/
+packages/node/test-output/
+packages/node/test-platform-packages/
+
 # IDE
 .vscode
 .idea/
 *.iml
+*.swp
+*.swo
 
 # System
 .DS_Store
+Thumbs.db
