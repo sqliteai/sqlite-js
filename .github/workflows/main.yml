@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
@@ -291,10 +292,12 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: update npm
+        if: steps.tag.outputs.version != ''
+        run: npm install -g npm@11.5.1
+
       - name: build and publish npm packages
         if: steps.tag.outputs.version != ''
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/node
 
@@ -328,8 +331,7 @@ jobs:
             platform_name=$(basename "$platform_dir")
             echo "  Publishing @sqliteai/sqlite-js-${platform_name}..."
             cd "$platform_dir"
-            npm publish --access public
-            # TODO: Add --provenance flag after switching to OIDC (requires package to exist first)
+            npm publish --provenance --access public
             cd ..
             echo "  ✓ Published @sqliteai/sqlite-js-${platform_name}"
           done
@@ -337,8 +339,7 @@ jobs:
 
           # Publish main package
           echo "Publishing main package to npm..."
-          npm publish --access public
-          # TODO: Add --provenance flag after switching to OIDC (requires package to exist first)
+          npm publish --provenance --access public
           echo "✓ Published @sqliteai/sqlite-js@${{ steps.tag.outputs.version }}"
 
           echo ""
