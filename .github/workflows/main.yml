@@ -289,12 +289,8 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.tag.outputs.version != ''
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-
-      - name: update npm
-        if: steps.tag.outputs.version != ''
-        run: sudo npm install -g npm@11.9.0
 
       - name: build and publish npm packages
         if: steps.tag.outputs.version != ''
