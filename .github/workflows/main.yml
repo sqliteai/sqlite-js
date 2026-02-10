@@ -294,7 +294,7 @@ jobs:
 
       - name: update npm
         if: steps.tag.outputs.version != ''
-        run: npm install -g npm@11.5.1
+        run: sudo npm install -g npm@11.9.0
 
       - name: build and publish npm packages
         if: steps.tag.outputs.version != ''
@@ -349,12 +349,54 @@ jobs:
           echo "   Platform packages: 7"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+      - name: assemble and publish flutter package
+        if: steps.tag.outputs.version != ''
+        run: |
+          VERSION=${{ steps.tag.outputs.version }}
+          FLUTTER_DIR=packages/flutter
+
+          # Android
+          mkdir -p $FLUTTER_DIR/native_libraries/android
+          cp artifacts/js-android-arm64-v8a/js.so  $FLUTTER_DIR/native_libraries/android/js_android_arm64.so
+          cp artifacts/js-android-x86_64/js.so     $FLUTTER_DIR/native_libraries/android/js_android_x64.so
+
+          # iOS device
+          mkdir -p $FLUTTER_DIR/native_libraries/ios
+          cp artifacts/js-ios/js.dylib $FLUTTER_DIR/native_libraries/ios/js_ios_arm64.dylib
+
+          # iOS simulator (keep universal/fat binary as-is)
+          mkdir -p $FLUTTER_DIR/native_libraries/ios-sim
+          cp artifacts/js-ios-sim/js.dylib $FLUTTER_DIR/native_libraries/ios-sim/js_ios-sim.dylib
+
+          # macOS (separate arch-specific dylibs)
+          mkdir -p $FLUTTER_DIR/native_libraries/mac
+          cp artifacts/js-macos-arm64/js.dylib $FLUTTER_DIR/native_libraries/mac/js_mac_arm64.dylib
+          cp artifacts/js-macos-x86_64/js.dylib $FLUTTER_DIR/native_libraries/mac/js_mac_x64.dylib
+
+          # Linux
+          mkdir -p $FLUTTER_DIR/native_libraries/linux
+          cp artifacts/js-linux-x86_64/js.so $FLUTTER_DIR/native_libraries/linux/js_linux_x64.so
+          cp artifacts/js-linux-arm64/js.so  $FLUTTER_DIR/native_libraries/linux/js_linux_arm64.so
+
+          # Windows
+          mkdir -p $FLUTTER_DIR/native_libraries/windows
+          cp artifacts/js-windows-x86_64/js.dll $FLUTTER_DIR/native_libraries/windows/js_windows_x64.dll
+
+          # Update version
+          sed -i "s/^version: .*/version: $VERSION/" $FLUTTER_DIR/pubspec.yaml
+
+          # Publish to pub.dev
+          cd $FLUTTER_DIR
+          dart pub publish --dry-run
+          dart pub publish --force
+
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
         with:
           body: |
             # Packages
 
+            [**Flutter/Dart**](https://pub.dev/packages/sqlite_js): `dart pub add sqlite_js`
             [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-js): `npm install @sqliteai/sqlite-js`
             [**Android**](https://central.sonatype.com/artifact/ai.sqlite/js): `ai.sqlite:js:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-js#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-js#swift-package)

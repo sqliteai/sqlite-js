@@ -1,0 +1,22 @@
+name: sqlite_js
+version: 1.1.16
+description: >
+  SQLite JS is a powerful extension that brings JavaScript capabilities to SQLite.
+  With this extension, you can create custom SQLite functions, aggregates, 
+  window functions, and collation sequences using JavaScript code, allowing 
+  for flexible and powerful data manipulation directly within your SQLite database.
+homepage: https://github.com/sqliteai/sqlite-js
+repository: https://github.com/sqliteai/sqlite-js
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  code_assets: ^1.0.0
+  hooks: ^1.0.0
+  path: ^1.8.0
+  sqlite3: ^3.0.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.24.0

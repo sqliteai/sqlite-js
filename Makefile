@@ -67,7 +67,7 @@ else ifeq ($(PLATFORM),android)
 	endif
 	CC = $(BIN)/$(ARCH)-linux-android26-clang
 	TARGET := $(DIST_DIR)/js.so
-	LDFLAGS := -lm -shared
+	LDFLAGS := -lm -shared -Wl,-z,max-page-size=16384
 	STRIP = $(BIN)/llvm-strip --strip-unneeded $@
 else ifeq ($(PLATFORM),ios)
 	TARGET := $(DIST_DIR)/js.dylib
