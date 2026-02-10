@@ -1,0 +1,83 @@
+name: publish flutter package
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    name: publish to pub.dev
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+
+      - name: download release assets
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+          mkdir -p artifacts
+          cd artifacts
+
+          # Download all platform binaries from the GitHub release
+          gh release download "$VERSION" --pattern "js-*.tar.gz"
+
+          # Extract all archives
+          for archive in js-*.tar.gz; do
+            name=$(basename "$archive" "-$VERSION.tar.gz")
+            mkdir -p "$name"
+            tar -xzf "$archive" -C "$name"
+            rm "$archive"
+          done
+
+          ls -la
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: dart-lang/setup-dart@v1.7.1
+
+      - name: assemble and publish flutter package
+        run: |
+          FLUTTER_DIR=packages/flutter
+
+          # Android
+          mkdir -p $FLUTTER_DIR/native_libraries/android
+          cp artifacts/js-android-arm64-v8a/js.so  $FLUTTER_DIR/native_libraries/android/js_android_arm64.so
+          cp artifacts/js-android-x86_64/js.so     $FLUTTER_DIR/native_libraries/android/js_android_x64.so
+
+          # iOS device
+          mkdir -p $FLUTTER_DIR/native_libraries/ios
+          cp artifacts/js-ios/js.dylib $FLUTTER_DIR/native_libraries/ios/js_ios_arm64.dylib
+
+          # iOS simulator (keep universal/fat binary as-is)
+          mkdir -p $FLUTTER_DIR/native_libraries/ios-sim
+          cp artifacts/js-ios-sim/js.dylib $FLUTTER_DIR/native_libraries/ios-sim/js_ios-sim.dylib
+
+          # macOS (separate arch-specific dylibs)
+          mkdir -p $FLUTTER_DIR/native_libraries/mac
+          cp artifacts/js-macos-arm64/js.dylib $FLUTTER_DIR/native_libraries/mac/js_mac_arm64.dylib
+          cp artifacts/js-macos-x86_64/js.dylib $FLUTTER_DIR/native_libraries/mac/js_mac_x64.dylib
+
+          # Linux
+          mkdir -p $FLUTTER_DIR/native_libraries/linux
+          cp artifacts/js-linux-x86_64/js.so $FLUTTER_DIR/native_libraries/linux/js_linux_x64.so
+          cp artifacts/js-linux-arm64/js.so  $FLUTTER_DIR/native_libraries/linux/js_linux_arm64.so
+
+          # Windows
+          mkdir -p $FLUTTER_DIR/native_libraries/windows
+          cp artifacts/js-windows-x86_64/js.dll $FLUTTER_DIR/native_libraries/windows/js_windows_x64.dll
+
+          # Update version
+          sed -i "s/^version: .*/version: $VERSION/" $FLUTTER_DIR/pubspec.yaml
+
+          # Publish to pub.dev
+          cd $FLUTTER_DIR
+          dart pub get
+          dart pub publish --dry-run
+          dart pub publish --force
