@@ -102,7 +102,7 @@ function generatePackageJson(platform, version) {
     license: 'SEE LICENSE IN LICENSE.md',
     repository: {
       type: 'git',
-      url: 'https://github.com/sqliteai/sqlite-js.git',
+      url: 'git+https://github.com/sqliteai/sqlite-js.git',
       directory: 'packages/node',
     },
     engines: {
