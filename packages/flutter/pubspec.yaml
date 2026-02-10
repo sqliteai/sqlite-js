@@ -1,5 +1,5 @@
 name: sqlite_js
-version: 1.1.18
+version: 1.1.19
 description: >
   SQLite JS is a powerful extension that brings JavaScript capabilities to SQLite.
   With this extension, you can create custom SQLite functions, aggregates, 

@@ -345,6 +345,9 @@ jobs:
           echo "   Platform packages: 7"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+      - uses: dart-lang/setup-dart@v1.7.1
+        if: steps.tag.outputs.version != ''
+
       - name: assemble and publish flutter package
         if: steps.tag.outputs.version != ''
         run: |
@@ -383,6 +386,7 @@ jobs:
 
           # Publish to pub.dev
           cd $FLUTTER_DIR
+          dart pub get
           dart pub publish --dry-run
           dart pub publish --force
 
