@@ -356,7 +356,7 @@ jobs:
           body: |
             # Packages
 
-            [**Flutter/Dart**](https://pub.dev/packages/sqlite_js): `dart pub add sqlite_js`
+            [**Flutter/Dart**](https://pub.dev/packages/sqlite_js): `flutter pub add sqlite_js:${{ steps.tag.outputs.version }}` or `dart pub add sqlite_js:${{ steps.tag.outputs.version }}`
             [**Node**](https://www.npmjs.com/package/@sqliteai/sqlite-js): `npm install @sqliteai/sqlite-js`
             [**Android**](https://central.sonatype.com/artifact/ai.sqlite/js): `ai.sqlite:js:${{ steps.tag.outputs.version }}`
             [**Swift**](https://github.com/sqliteai/sqlite-js#swift-package): [Installation Guide](https://github.com/sqliteai/sqlite-js#swift-package)

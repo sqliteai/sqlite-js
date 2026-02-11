@@ -86,6 +86,27 @@ SQLiteDatabase db = SQLiteDatabase.openDatabase(config, null, null);
 
 **Note:** Additional settings and configuration are required for a complete setup. For full implementation details, see the [complete Android example](https://github.com/sqliteai/sqlite-extensions-guide/blob/main/examples/android/README.md).
 
+### Flutter Package
+
+Add the [sqlite_js](https://pub.dev/packages/sqlite_js) package to your project:
+
+```bash
+flutter pub add sqlite_js  # Flutter projects
+dart pub add sqlite_js     # Dart projects
+```
+
+Usage with `sqlite3` package:
+```dart
+import 'package:sqlite3/sqlite3.dart';
+import 'package:sqlite_js/sqlite_js.dart';
+
+sqlite3.loadSqliteJsExtension();
+final db = sqlite3.openInMemory();
+print(db.select('SELECT js_version()'));
+```
+
+For a complete example, see the [Flutter example](https://github.com/sqliteai/sqlite-extensions-guide/blob/main/examples/flutter/README.md).
+
 ## Functions Overview
 
 SQLite-JS provides several ways to extend SQLite functionality with JavaScript:
