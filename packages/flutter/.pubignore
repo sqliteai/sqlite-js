@@ -1,0 +1,3 @@
+# Only ignore development files, NOT native_libraries
+.dart_tool/
+pubspec.lock

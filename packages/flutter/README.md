@@ -1,6 +1,6 @@
 # sqlite_js
 
-SQLite JavaScript extension for Flutter/Dart. Execute JavaScript code directly within SQLite using the QuickJS engine.
+SQLite JS is a powerful extension that brings JavaScript capabilities to SQLite. With this extension, you can create custom SQLite functions, aggregates, window functions, and collation sequences using JavaScript code, allowing for flexible and powerful data manipulation directly within your SQLite database.
 
 ## Installation
 
