@@ -1,8 +1,10 @@
 name: build, test and release sqlite-js
 on:
   push:
+    branches:
+      - '**'
     tags-ignore:
-      - '*'
+      - '**'
   workflow_dispatch:
 
 permissions:
