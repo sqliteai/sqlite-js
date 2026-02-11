@@ -348,6 +348,7 @@ jobs:
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
         with:
+          token: ${{ secrets.RELEASE_PAT }}
           body: |
             # Packages
 
