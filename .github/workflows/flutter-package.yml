@@ -76,16 +76,6 @@ jobs:
           # Update version
           sed -i "s/^version: .*/version: $VERSION/" $FLUTTER_DIR/pubspec.yaml
 
-          # Debug: show files before publishing
-          echo "=== .pubignore contents ==="
-          cat $FLUTTER_DIR/.pubignore || echo "No .pubignore found"
-          echo ""
-          echo "=== native_libraries contents ==="
-          find $FLUTTER_DIR/native_libraries -type f 2>/dev/null || echo "No native_libraries found"
-          echo ""
-          echo "=== Full package tree ==="
-          find $FLUTTER_DIR -type f | head -50
-
           # Publish to pub.dev
           cd $FLUTTER_DIR
           dart pub get
