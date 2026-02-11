@@ -1,3 +1,7 @@
 # Only ignore development files, NOT native_libraries
 .dart_tool/
 pubspec.lock
+
+# Explicitly include native_libraries (override any parent .gitignore)
+!native_libraries/
+!native_libraries/**
