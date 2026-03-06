@@ -12,6 +12,7 @@
 - [Collation Sequences](#collation-sequences)
 - [Sync JavaScript Functions Across Devices](#syncing-across-devices)
 - [JavaScript Evaluation](#javascript-evaluation)
+- [Utility Functions](#utility-functions)
 - [Examples](#examples)
 - [Update Functions](#update-functions)
 - [Function Naming Rules](#function-naming-rules)
@@ -68,7 +69,7 @@ sqlite3_close(db)
 Add the [following](https://central.sonatype.com/artifact/ai.sqlite/js) to your Gradle dependencies:
 
 ```gradle
-implementation 'ai.sqlite:js:1.1.12'
+implementation 'ai.sqlite:js:1.3.0'
 ```
 
 Here's an example of how to use the package:
@@ -85,6 +86,24 @@ SQLiteDatabase db = SQLiteDatabase.openDatabase(config, null, null);
 ```
 
 **Note:** Additional settings and configuration are required for a complete setup. For full implementation details, see the [complete Android example](https://github.com/sqliteai/sqlite-extensions-guide/blob/main/examples/android/README.md).
+
+### Node.js Package
+
+Install the [@sqliteai/sqlite-js](https://www.npmjs.com/package/@sqliteai/sqlite-js) package:
+
+```bash
+npm install @sqliteai/sqlite-js
+```
+
+Usage with `better-sqlite3`:
+```typescript
+import { getExtensionPath } from '@sqliteai/sqlite-js';
+import Database from 'better-sqlite3';
+
+const db = new Database(':memory:');
+db.loadExtension(getExtensionPath());
+console.log(db.prepare('SELECT js_version()').pluck().get());
+```
 
 ### Flutter Package
 
@@ -325,6 +344,34 @@ SELECT js_eval('Math.PI * Math.pow(5, 2)');
 SELECT js_eval('new Date(1629381600000).toLocaleDateString()');
 ```
 
+## Utility Functions
+
+### js_version
+
+Returns the extension version string, or the internal QuickJS engine version when called with an argument.
+
+```sql
+SELECT js_version();      -- Returns the SQLite-JS version (e.g. '1.3.0')
+SELECT js_version(1);     -- Returns the QuickJS engine version
+```
+
+### js_load_text / js_load_blob
+
+Load file contents into SQLite — as text or as a blob.
+
+```sql
+SELECT js_load_text('/path/to/file.txt');   -- Returns file contents as text
+SELECT js_load_blob('/path/to/file.bin');   -- Returns file contents as a blob
+```
+
+### js_set_max_stack_size
+
+Configures the maximum stack size (in bytes) for the JavaScript engine.
+
+```sql
+SELECT js_set_max_stack_size(1048576);  -- Set max stack size to 1 MB
+```
+
 ## Examples
 
 ### Example 1: String Manipulation
@@ -453,7 +500,7 @@ make install
 
 ## 📦 Integrations
 
-Use SQLite-AI alongside:
+Use SQLite-JS alongside:
 
 * **[SQLite-AI](https://github.com/sqliteai/sqlite-ai)** – on-device inference, embedding generation, and model interaction directly into your database
 * **[SQLite-Vector](https://github.com/sqliteai/sqlite-vector)** – vector search from SQL
