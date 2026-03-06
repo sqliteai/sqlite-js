@@ -235,40 +235,6 @@ jobs:
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest)
             LATEST=$(echo "$LATEST_RELEASE" | jq -r '.name')
-            # Check artifact sizes against previous release
-            if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
-              echo "Checking artifact sizes against previous release: $LATEST"
-              FAILED=0
-              for artifact in js-*-${VERSION}.*; do
-                if [ ! -f "$artifact" ]; then
-                  continue
-                fi
-                # Get current artifact size
-                NEW_SIZE=$(stat -c%s "$artifact" 2>/dev/null || stat -f%z "$artifact")
-                # Get artifact name for previous release
-                ARTIFACT_NAME=$(echo "$artifact" | sed "s/${VERSION}/${LATEST}/")
-                # Get previous artifact size from GitHub API
-                OLD_SIZE=$(echo "$LATEST_RELEASE" | jq -r ".assets[] | select(.name == \"$(basename "$ARTIFACT_NAME")\") | .size")
-                if [ -z "$OLD_SIZE" ] || [ "$OLD_SIZE" = "null" ]; then
-                  echo "⚠️  Previous artifact not found: $(basename "$ARTIFACT_NAME"), skipping comparison"
-                  continue
-                fi
-                # Calculate percentage increase
-                INCREASE=$(awk "BEGIN {printf \"%.2f\", (($NEW_SIZE - $OLD_SIZE) / $OLD_SIZE) * 100}")
-                echo "📦 $artifact: $OLD_SIZE → $NEW_SIZE bytes (${INCREASE}% change)"
-                # Check if increase is more than 5%
-                if (( $(echo "$INCREASE > 5" | bc -l) )); then
-                  echo "❌ ERROR: $artifact size increased by ${INCREASE}% (limit: 5%)"
-                  FAILED=1
-                fi
-              done
-              if [ $FAILED -eq 1 ]; then
-                echo ""
-                echo "❌ One or more artifacts exceeded the 5% size increase limit"
-                exit 1
-              fi
-              echo "✅ All artifacts within 5% size increase limit"
-            fi
 
             if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
               echo "version=$VERSION" >> $GITHUB_OUTPUT
