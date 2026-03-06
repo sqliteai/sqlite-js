@@ -16,7 +16,7 @@
 #include "sqlite3.h"
 #endif
 
-#define SQLITE_JS_VERSION   "1.2.3"
+#define SQLITE_JS_VERSION   "1.3.0"
 
 int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
 const char *sqlitejs_version (void);
