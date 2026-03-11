@@ -79,5 +79,4 @@ jobs:
           # Publish to pub.dev
           cd $FLUTTER_DIR
           dart pub get
-          dart pub publish --dry-run
           dart pub publish --force

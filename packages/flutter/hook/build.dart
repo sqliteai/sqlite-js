@@ -17,9 +17,7 @@ void main(List<String> args) async {
 
     final binaryPath = _resolveBinaryPath(os, arch, codeConfig);
     if (binaryPath == null) {
-      throw UnsupportedError(
-        'sqlite_js does not support $os $arch.',
-      );
+      throw UnsupportedError('sqlite_js does not support $os $arch.');
     }
 
     final nativeLibDir = p.join(
@@ -34,15 +32,66 @@ void main(List<String> args) async {
       );
     }
 
+    output.dependencies.add(file.uri);
+
+    final assetFile = await _prepareAssetFile(
+      input: input,
+      os: os,
+      arch: arch,
+      config: codeConfig,
+      file: file,
+    );
+
     output.assets.code.add(
       CodeAsset(
         package: input.packageName,
         name: 'src/native/sqlite_js_extension.dart',
         linkMode: DynamicLoadingBundled(),
-        file: file.uri,
+        file: assetFile.uri,
       ),
     );
   });
+}
+
+Future<File> _prepareAssetFile({
+  required BuildInput input,
+  required OS os,
+  required Architecture arch,
+  required CodeConfig config,
+  required File file,
+}) async {
+  if (os != OS.iOS || config.iOS.targetSdk == IOSSdk.iPhoneOS) {
+    return file;
+  }
+
+  final thinArch = switch (arch) {
+    Architecture.arm64 => 'arm64',
+    Architecture.x64 => 'x86_64',
+    _ => null,
+  };
+  if (thinArch == null) {
+    return file;
+  }
+
+  final outputName = 'js_ios_sim_$thinArch.dylib';
+  final outputFile = File.fromUri(input.outputDirectory.resolve(outputName));
+  await outputFile.parent.create(recursive: true);
+
+  final result = await Process.run('/usr/bin/lipo', [
+    file.path,
+    '-thin',
+    thinArch,
+    '-output',
+    outputFile.path,
+  ]);
+  if (result.exitCode != 0) {
+    throw StateError(
+      'Failed to thin sqlite_js iOS simulator binary for $thinArch: '
+      '${result.stderr}',
+    );
+  }
+
+  return outputFile;
 }
 
 String? _resolveBinaryPath(OS os, Architecture arch, CodeConfig config) {
