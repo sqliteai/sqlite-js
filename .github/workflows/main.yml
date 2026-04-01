@@ -135,7 +135,7 @@ jobs:
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/js.xcframework # Then sign the xcframework wrapper
           ditto -c -k --keepParent dist/js.xcframework dist/js.xcframework.zip
           xcrun notarytool submit dist/js.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
-          rm dist/js.xcframework.zip
+          rm -rf dist/js.xcframework
 
       - name: cleanup keychain for codesign
         if: matrix.os == 'macos-15'
@@ -220,7 +220,11 @@ jobs:
               if [[ "$name" != "js-apple-xcframework" && "$name" != "js-android-aar" ]]; then
                 tar -czf "${name}-${VERSION}.tar.gz" -C "$folder" .
               fi
-              if [[ "$name" != "js-android-aar" ]]; then
+              if [[ "$name" == "js-apple-xcframework" ]]; then
+                # Use the ditto-created zip that preserves macOS symlinks and extract for other steps
+                cp "$folder/js.xcframework.zip" "${name}-${VERSION}.zip"
+                unzip -q "$folder/js.xcframework.zip" -d "$folder/"
+              elif [[ "$name" != "js-android-aar" ]]; then
                 (cd "$folder" && zip -rq "../../${name}-${VERSION}.zip" .)
               else
                 cp "$folder"/*.aar "${name}-${VERSION}.aar"
@@ -314,6 +318,23 @@ jobs:
           echo "   Main: @sqliteai/sqlite-js@${{ steps.tag.outputs.version }}"
           echo "   Platform packages: 7"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: update Package.swift checksum and version
+        if: steps.tag.outputs.version != ''
+        run: |
+          VERSION=${{ steps.tag.outputs.version }}
+          ZIP="js-apple-xcframework-${VERSION}.zip"
+          if [ -f "$ZIP" ]; then
+            CHECKSUM=$(swift package compute-checksum "$ZIP")
+            URL="https://github.com/sqliteai/sqlite-js/releases/download/${VERSION}/${ZIP}"
+            sed -i "s|url: \".*apple-xcframework.*\"|url: \"${URL}\"|" Package.swift
+            sed -i "s|checksum: \".*\"|checksum: \"${CHECKSUM}\"|" Package.swift
+            git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+            git config --global user.name "$GITHUB_ACTOR"
+            git add Package.swift
+            git commit -m "Update Package.swift checksum for ${VERSION} [skip ci]" || true
+            git push origin main || true
+          fi
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''

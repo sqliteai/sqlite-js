@@ -7,27 +7,20 @@ let package = Package(
     name: "js",
     platforms: [.macOS(.v11), .iOS(.v11)],
     products: [
-        // Products can be used to vend plugins, making them visible to other packages.
-        .plugin(
-            name: "jsPlugin",
-            targets: ["jsPlugin"]),
         .library(
             name: "js",
             targets: ["js"])
     ],
     targets: [
-        // Build tool plugin that invokes the Makefile
-        .plugin(
-            name: "jsPlugin",
-            capability: .buildTool(),
-            path: "packages/swift/plugin"
+        .binaryTarget(
+            name: "jsBinary",
+            url: "https://github.com/sqliteai/sqlite-js/releases/download/1.3.2/js-apple-xcframework-1.3.2.zip",
+            checksum: "0000000000000000000000000000000000000000000000000000000000000000"
         ),
-        // js library target
         .target(
             name: "js",
-            dependencies: [],
-            path: "packages/swift/extension",
-            plugins: ["jsPlugin"]
+            dependencies: ["jsBinary"],
+            path: "packages/swift"
         ),
     ]
 )
