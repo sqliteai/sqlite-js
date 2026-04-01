@@ -15,7 +15,7 @@ let package = Package(
         .binaryTarget(
             name: "jsBinary",
             url: "https://github.com/sqliteai/sqlite-js/releases/download/1.3.2/js-apple-xcframework-1.3.2.zip",
-            checksum: "0000000000000000000000000000000000000000000000000000000000000000"
+            checksum: "5622ed8a3a52ee5d5d10974aa58b2fd701872503d1c56eba5477fa1866be071c"
         ),
         .target(
             name: "js",
