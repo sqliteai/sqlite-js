@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   build:
+    if: ${{ !contains(github.event.head_commit.message, '[auto-update]') }}
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container && matrix.container || '' }}
     name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }} build${{ matrix.arch != 'arm64-v8a' && matrix.name != 'ios-sim' && matrix.name != 'ios' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar' && ( matrix.name != 'macos' || matrix.arch != 'x86_64' ) && ' + test' || ''}}
@@ -332,7 +333,7 @@ jobs:
             git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
             git config --global user.name "$GITHUB_ACTOR"
             git add Package.swift
-            git commit -m "Update Package.swift checksum for ${VERSION} [skip ci]" || true
+            git commit -m "Update Package.swift checksum for ${VERSION} [auto-update]" || true
             git push origin main || true
           fi
 
