@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.3.5] - 2026-11-01
+
+### Fixed
+
+- **Crashes when loading a function definition with missing code**: a row in the JavaScript functions table whose `step_code` or `final_code` was `NULL` dereferenced a NULL pointer and crashed the process on `js_init_table(1)`. The code required by each function kind is now validated before use.
+- **Out-of-bounds read when the JavaScript functions table has an unexpected layout**: the loader selected every column and trusted their order and count, reading past the end of the result in release builds, where the assertion that guarded it is compiled out. It now selects its seven columns explicitly and aborts with a clear error if they do not match.
+- **Use-after-free when extension initialization failed**: the global JavaScript context was released twice, because SQLite already invokes the destructor callback when registering a function fails. Depending on where the failure happened this either touched freed memory or leaked the whole JavaScript runtime.
+- **Leak when registering a collation failed**: unlike `sqlite3_create_function_v2()`, `sqlite3_create_collation_v2()` does not invoke the destructor callback on failure, so the function context and the reference it held on the JavaScript runtime were never released.
+- **Unknown function kinds silently reported success**: a definition whose kind was not `scalar`, `aggregate`, `window` or `collation` registered nothing, leaked its context and still returned `SQLITE_OK`. It is now rejected with an explicit error.
+- **`js_load_text()` / `js_load_blob()` on an empty file** reported "out of memory" instead of returning an empty result. A failing `fseek()` or `ftell()` is now reported as a real error, and a file too large for SQLite's maximum length is reported as too big.
+- **`js_load_text()` on files with CRLF line endings** could fail on Windows, where the file size and the number of bytes actually read legitimately differ in text mode.
+- **Invalid `value` or `inverse` code in a window function** was accepted when the function was created and only failed at the first query. All of a window function's code is now validated at creation time.
+- **Collations returning a fractional value** such as `-0.5` were treated as "equal", so no ordering took place; only the sign of the returned value is now considered. A collation that throws or returns a non-number now consistently answers "equal" instead of "less than", which could produce wrong orderings.
+- **Unhelpful `Rowset` errors**: an out-of-range column index, or use after the last row, reported "Unknown JavaScript exception" instead of describing the problem.
+- **Error reporting from `js_init_table(1)`**: a detailed error was replaced by a bare error code, and attempting to update an already-registered function reported the error code as its message.
+
+### Changed
+
+- The extension now builds without warnings under `-Wall -Wextra`.
+
 ## [1.3.3] - 2026-04-07
 
 ### Fixed
