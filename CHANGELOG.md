@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [1.3.5] - 2026-11-01
+## [1.3.6] - 2026-11-01
 
 ### Fixed
 
@@ -23,6 +23,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - The extension now builds without warnings under `-Wall -Wextra`.
+- The npm platform packages now ship the `LICENSE` file from the repository root, and declare `Apache-2.0` as their license. They previously referenced a `LICENSE.md` that no longer exists, which aborted the release before any package was published. The remaining references to the Elastic License 2.0 in the Node and Flutter packages were updated to match the Apache License 2.0 the project ships.
+
+## [1.3.5] - 2026-11-01
+
+Not released. The release pipeline failed before publishing, so this version exists
+only as an Android artifact on Maven Central. Superseded by 1.3.6.
 
 ## [1.3.3] - 2026-04-07
 

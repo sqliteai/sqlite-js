@@ -1,7 +1,7 @@
 # @sqliteai/sqlite-js
 
 [![npm version](https://badge.fury.io/js/@sqliteai%2Fsqlite-js.svg)](https://www.npmjs.com/package/@sqliteai/sqlite-js)
-[![License](https://img.shields.io/badge/license-Elastic%202.0-blue.svg)](LICENSE.md)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 > SQLite JS extension packaged for Node.js
 
@@ -140,7 +140,7 @@ Error thrown when the SQLite JS extension cannot be found for the current platfo
 
 ## License
 
-This project is licensed under the [Elastic License 2.0](LICENSE.md).
+This project is licensed under the [Apache License 2.0](LICENSE).
 
 For production or managed service use, please [contact SQLite Cloud, Inc](mailto:info@sqlitecloud.io) for a commercial license.
 

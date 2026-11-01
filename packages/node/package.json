@@ -20,7 +20,7 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE.md"
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
@@ -38,7 +38,7 @@
     "sqlite-extension"
   ],
   "author": "Gioele Cantoni (gioele@sqlitecloud.io)",
-  "license": "SEE LICENSE IN LICENSE.md",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sqliteai/sqlite-js.git",
