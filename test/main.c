@@ -154,6 +154,30 @@ int check_query_double(sqlite3 *db, const char *sql, double expected, double eps
 
 // MARK: -
 
+// Opens an in-memory database with the extension loaded.
+int test_open (sqlite3 **db) {
+    int rc = sqlite3_open(":memory:", db);
+    if (rc != SQLITE_OK) return rc;
+    
+    #if JS_LOAD_EMBEDDED
+    return sqlite3_js_init(*db, NULL, NULL);
+    #else
+    rc = sqlite3_enable_load_extension(*db, 1);
+    if (rc != SQLITE_OK) return rc;
+    return db_exec(*db, "SELECT load_extension('./dist/js');");
+    #endif
+}
+
+// sql must fail with an error message that contains expected
+int check_error (sqlite3 *db, const char *sql, const char *expected) {
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc == SQLITE_OK || strstr(sqlite3_errmsg(db), expected) == NULL) {
+        printf("FAIL: %s\n      Expected an error containing: %s, Got: %d %s\n", sql, expected, rc, (rc == SQLITE_OK) ? "OK" : sqlite3_errmsg(db));
+        return SQLITE_ERROR;
+    }
+    return SQLITE_OK;
+}
+
 int test_serialization (const char *db_path, bool load_functions, int nstep) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(db_path, &db);
@@ -488,6 +512,38 @@ abort_test:
     return rc;
 }
 
+// MARK: - Aggregate errors -
+
+int test_aggregate_errors (void) {
+    sqlite3 *db = NULL;
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    rc = db_exec(db, "CREATE TABLE t (x); INSERT INTO t VALUES (1), (2), (3);");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // an exception thrown by an aggregate's step function fails the statement
+    rc = db_exec(db, "SELECT js_create_aggregate('step_fails', 'n = 0;', '(function(args){ if (args[0] == 2) throw new Error(\"step boom\"); n++; })', '(function(){ return n; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT step_fails(x) FROM t;", "step boom");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // so does one thrown by a window function's inverse function
+    rc = db_exec(db, "SELECT js_create_window('inverse_fails', 'total = 0;', '(function(args){ total += args[0]; })', '(function(){ return total; })', '(function(){ return total; })', '(function(args){ throw new Error(\"inverse boom\"); })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT inverse_fails(x) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t;", "inverse boom");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // and the connection stays usable
+    rc = check_query(db, "SELECT js_eval('[1, 2, 3].join()');", "1,2,3");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: -
 
 int test_report(const char *description, int rc){
@@ -504,6 +560,7 @@ int main (void) {
     result += test_report("Serialization 2", test_serialization(DB_PATH, false, 2)); // update functions previously registered in the js_functions table
     result += test_report("Serialization 3", test_serialization(DB_PATH, true,  3)); // load the new implementations
     result += test_report("Thread", test_thread());
+    result += test_report("Aggregate errors", test_aggregate_errors());
 
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;
