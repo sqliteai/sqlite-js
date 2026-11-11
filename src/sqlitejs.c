@@ -99,11 +99,16 @@ static JSValue js_rowset_next(JSContext *ctx, JSValueConst this_val, int argc, J
     if (!rs) return JS_ThrowTypeError(ctx, "Not a Rowset object");
     
     if (!rs->vm) return JS_FALSE;
-    if (sqlite3_step(rs->vm) == SQLITE_ROW) return JS_TRUE;
+    int rc = sqlite3_step(rs->vm);
+    if (rc == SQLITE_ROW) return JS_TRUE;
 
+    // an error while the statement runs (a constraint, an overflow, an interrupt) is an
+    // exception, as an error while it is prepared is in js_sqlite_exec; only the end of the
+    // rows is false
+    JSValue result = (rc == SQLITE_DONE) ? JS_FALSE : JS_ThrowInternalError(ctx, "%s", sqlite3_errmsg(sqlite3_db_handle(rs->vm)));
     sqlite3_finalize(rs->vm);
     rs->vm = NULL;
-    return JS_FALSE;
+    return result;
 }
 
 static JSValue js_rowset_get(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -152,8 +157,9 @@ static JSValue js_rowset_to_array(JSContext *ctx, JSValueConst this_val, int arg
     
     int ncols = rs->ncols;
     int nrows = 0;
+    int rc;
     while (true) {
-        int rc = sqlite3_step(rs->vm);
+        rc = sqlite3_step(rs->vm);
         if (rc != SQLITE_ROW) break;
         
         JSValue row = JS_NewArray(ctx);
@@ -170,7 +176,12 @@ static JSValue js_rowset_to_array(JSContext *ctx, JSValueConst this_val, int arg
         
         JS_SetPropertyUint32(ctx, result, nrows++, row);
     }
-    
+
+    // as in js_rowset_next: an error is an exception, not a shorter array
+    if (rc != SQLITE_DONE) {
+        JS_FreeValue(ctx, result);
+        result = JS_ThrowInternalError(ctx, "%s", sqlite3_errmsg(sqlite3_db_handle(rs->vm)));
+    }
     sqlite3_finalize(rs->vm);
     rs->vm = NULL;
     return result;
