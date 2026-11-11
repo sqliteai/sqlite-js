@@ -31,6 +31,7 @@ typedef struct {
     sqlite3             *db;
     JSClassID           rowSetClassID;
     int                 ref_count;
+    size_t              memory_limit;   // in bytes, 0 for none: see js_set_memory_limit()
 } globaljs_context;
 
 typedef struct {
@@ -187,6 +188,14 @@ static void js_rowset_finalizer(JSRuntime *rt, JSValue val) {
 
 // MARK: - Initializer -
 
+// The most memory, in bytes, the JavaScript runtime of a connection may allocate until
+// js_set_memory_limit() changes it; 0 means no limit. Without a limit, code that keeps
+// allocating takes all the memory of the process, which on a phone ends with the operating
+// system killing it. 64 MB is room for over a thousand aggregate contexts (about 54 KB each).
+#ifndef SQLITE_JS_DEFAULT_MEMORY_LIMIT
+#define SQLITE_JS_DEFAULT_MEMORY_LIMIT  (64 * 1024 * 1024)
+#endif
+
 static globaljs_context *globaljs_init (sqlite3 *db) {
     JSRuntime *rt = NULL;
     JSContext *ctx = NULL;
@@ -215,6 +224,11 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     JS_SetContextOpaque(ctx, js);
     JS_SetRuntimeOpaque(rt, js);
     js_global_init(ctx, js);
+    
+    // set only now: QuickJS cannot always recover from running out of memory while it creates
+    // a context (see js_setup_aggregate)
+    js->memory_limit = SQLITE_JS_DEFAULT_MEMORY_LIMIT;
+    JS_SetMemoryLimit(rt, js->memory_limit);
     
     return js;
     
@@ -642,15 +656,21 @@ static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, 
     }
     
     // create a separate context for testing purpose
+    // QuickJS cannot always recover from running out of memory while it creates a context: it
+    // can crash. So the context is created without the memory limit (it takes about 54 KB),
+    // which then applies again to the code that runs in it.
+    JS_SetMemoryLimit(js->runtime, 0);
     JSContext *ctx = JS_NewContext(js->runtime);
+    if (ctx) {
+        // setup global object
+        JS_SetContextOpaque(ctx, js);
+        js_global_init(ctx, js);
+    }
+    JS_SetMemoryLimit(js->runtime, js->memory_limit);
     if (!ctx) {
         sqlite3_result_error(context, "Unable to create a JS context.", -1);
         return false;
     }
-    
-    // setup global object
-    JS_SetContextOpaque(ctx, js);
-    js_global_init(ctx, js);
     
     // init code is optional
     if (init_code) {
@@ -1292,6 +1312,21 @@ void js_set_max_stack_size (sqlite3_context *context, int argc, sqlite3_value **
     JS_SetMaxStackSize(js->runtime, stack_size);
 }
 
+void js_set_memory_limit (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED(argc);
+    globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
+    
+    if ((sqlite3_value_type(argv[0]) != SQLITE_INTEGER) || (sqlite3_value_int64(argv[0]) < 0)) {
+        sqlite3_result_error(context, "The memory limit must be an integer number of bytes, or 0 for no limit", -1);
+        return;
+    }
+    
+    // a limit beyond the address space (on a 32-bit system) can never be reached, so it is no limit
+    sqlite3_uint64 limit = (sqlite3_uint64)sqlite3_value_int64(argv[0]);
+    js->memory_limit = (limit > SIZE_MAX) ? 0 : (size_t)limit;
+    JS_SetMemoryLimit(js->runtime, js->memory_limit);
+}
+
 // MARK: -
 
 const char *sqlitejs_version (void) {
@@ -1312,9 +1347,9 @@ APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_r
     globaljs_context *js = globaljs_init(db);
     if (!js) return SQLITE_NOMEM;
     
-    const char *f_name[] = {"js_version", "js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob", "js_init_table", "js_init_table", "js_set_max_stack_size"};
-    const void *f_ptr[] = {js_version0, js_version1, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob, js_init_table0, js_init_table1, js_set_max_stack_size};
-    int f_arg[] = {0, 1, 2, 4, 6, 2, 1, 1, 1, 0, 1, 1};
+    const char *f_name[] = {"js_version", "js_version", "js_create_scalar", "js_create_aggregate", "js_create_window", "js_create_collation", "js_eval", "js_load_text", "js_load_blob", "js_init_table", "js_init_table", "js_set_max_stack_size", "js_set_memory_limit"};
+    const void *f_ptr[] = {js_version0, js_version1, js_create_scalar, js_create_aggregate, js_create_window, js_create_collation, js_eval, js_load_text, js_load_blob, js_init_table0, js_init_table1, js_set_max_stack_size, js_set_memory_limit};
+    int f_arg[] = {0, 1, 2, 4, 6, 2, 1, 1, 1, 0, 1, 1, 1};
     
     size_t f_count = sizeof(f_name) / sizeof(const char *);
     for (size_t i=0; i<f_count; ++i) {

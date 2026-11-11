@@ -154,6 +154,30 @@ int check_query_double(sqlite3 *db, const char *sql, double expected, double eps
 
 // MARK: -
 
+// Opens an in-memory database with the extension loaded.
+int test_open (sqlite3 **db) {
+    int rc = sqlite3_open(":memory:", db);
+    if (rc != SQLITE_OK) return rc;
+    
+    #if JS_LOAD_EMBEDDED
+    return sqlite3_js_init(*db, NULL, NULL);
+    #else
+    rc = sqlite3_enable_load_extension(*db, 1);
+    if (rc != SQLITE_OK) return rc;
+    return db_exec(*db, "SELECT load_extension('./dist/js');");
+    #endif
+}
+
+// sql must fail with an error message that contains expected
+int check_error (sqlite3 *db, const char *sql, const char *expected) {
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc == SQLITE_OK || strstr(sqlite3_errmsg(db), expected) == NULL) {
+        printf("FAIL: %s\n      Expected an error containing: %s, Got: %d %s\n", sql, expected, rc, (rc == SQLITE_OK) ? "OK" : sqlite3_errmsg(db));
+        return SQLITE_ERROR;
+    }
+    return SQLITE_OK;
+}
+
 int test_serialization (const char *db_path, bool load_functions, int nstep) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(db_path, &db);
@@ -488,6 +512,89 @@ abort_test:
     return rc;
 }
 
+// MARK: - Memory limit -
+
+// Creates and runs an aggregate on a new connection with a memory limit of limit_kb, if not 0,
+// or with the default limit after filling all but free_kb of it. The statements may fail for
+// lack of memory, but must not crash: QuickJS can crash if it runs out of memory while it
+// creates a context, which every aggregate does.
+int test_aggregate_near_limit (int limit_kb, int free_kb) {
+    sqlite3 *db = NULL;
+    char sql[256];
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    if (limit_kb) snprintf(sql, sizeof(sql), "SELECT js_set_memory_limit(%d * 1024);", limit_kb);
+    else snprintf(sql, sizeof(sql), "SELECT js_eval('globalThis.keep = []; try { for (;;) keep.push(new ArrayBuffer(1024)); } catch (e) {} keep.length -= %d; 0');", free_kb);
+    rc = db_exec(db, sql);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    sqlite3_exec(db, "SELECT js_create_aggregate('n_rows', 'n = 0;', '(function(args){ n++; })', '(function(){ return n; })');", NULL, NULL, NULL);
+    sqlite3_exec(db, "WITH v(x) AS (VALUES (1), (2)) SELECT n_rows(x) FROM v;", NULL, NULL, NULL);
+    
+abort_test:
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
+int test_memory_limit (void) {
+    sqlite3 *db = NULL;
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // the default limit, 64 MB, allows 16 MB but not 128 MB
+    rc = check_query(db, "SELECT js_eval('new ArrayBuffer(16 * 1024 * 1024).byteLength');", "16777216");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('new ArrayBuffer(128 * 1024 * 1024).byteLength');", "out of memory");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // code that keeps allocating stops at the limit, and the connection stays usable
+    rc = check_error(db, "SELECT js_eval('(function () { const a = []; for (;;) a.push(new Array(100000).fill(1)); })()');", "out of memory");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('[1, 2, 3].map(x => x * 2).join()');", "2,4,6");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a higher limit, then no limit
+    rc = db_exec(db, "SELECT js_set_memory_limit(256 * 1024 * 1024);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('new ArrayBuffer(128 * 1024 * 1024).byteLength');", "134217728");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_set_memory_limit(0);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('new ArrayBuffer(128 * 1024 * 1024).byteLength');", "134217728");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a lower limit
+    rc = db_exec(db, "SELECT js_set_memory_limit(8 * 1024 * 1024);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('new ArrayBuffer(16 * 1024 * 1024).byteLength');", "out of memory");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // only a non-negative integer is a limit
+    const char *invalid[] = {"-1", "1.5", "'1000000'", "NULL", "x'00'"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        char sql[128];
+        snprintf(sql, sizeof(sql), "SELECT js_set_memory_limit(%s);", invalid[i]);
+        rc = check_error(db, sql, "The memory limit must be an integer number of bytes");
+        if (rc != SQLITE_OK) goto abort_test;
+    }
+    
+    // aggregates fail cleanly near the limit: under small limits, and with little memory left
+    for (int kb = 100; kb <= 420; kb += 8) {
+        rc = test_aggregate_near_limit(kb, 0);
+        if (rc != SQLITE_OK) goto abort_test;
+    }
+    for (int kb = 0; kb <= 16; ++kb) {
+        rc = test_aggregate_near_limit(0, kb);
+        if (rc != SQLITE_OK) goto abort_test;
+    }
+    
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: -
 
 int test_report(const char *description, int rc){
@@ -504,6 +611,7 @@ int main (void) {
     result += test_report("Serialization 2", test_serialization(DB_PATH, false, 2)); // update functions previously registered in the js_functions table
     result += test_report("Serialization 3", test_serialization(DB_PATH, true,  3)); // load the new implementations
     result += test_report("Thread", test_thread());
+    result += test_report("Memory limit", test_memory_limit());
 
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;
