@@ -176,6 +176,19 @@ SQLite-JS provides several ways to extend SQLite functionality with JavaScript:
 | Collation Sequences | Define custom sort orders for text values |
 | JavaScript Evaluation | Directly evaluate JavaScript code within SQLite |
 
+### Values
+
+SQL values reach JavaScript as follows:
+
+| SQL | JavaScript |
+|-----|------------|
+| NULL | `null` |
+| INTEGER, REAL | number |
+| TEXT | string |
+| BLOB | `ArrayBuffer` |
+
+A JavaScript result goes back to SQL as follows: `null` and `undefined` become NULL, a boolean an INTEGER (1 or 0), a number an INTEGER if it is a whole number in the 32-bit range and a REAL otherwise, a BigInt an INTEGER, a string TEXT, and an `ArrayBuffer` or a typed array such as `Uint8Array` a BLOB. Other objects become NULL; return `JSON.stringify(value)` to keep one as TEXT. The parameters of `db.exec()` convert the same way.
+
 ## Scalar Functions
 
 Scalar functions process one row at a time and return a single value. They are useful for data transformation, calculations, text manipulation, etc.
