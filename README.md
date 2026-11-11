@@ -187,7 +187,9 @@ SQL values reach JavaScript as follows:
 | TEXT | string |
 | BLOB | `ArrayBuffer` |
 
-A JavaScript result goes back to SQL as follows: `null` and `undefined` become NULL, a boolean an INTEGER (1 or 0), a number an INTEGER if it is a whole number in the 32-bit range and a REAL otherwise, a BigInt an INTEGER, a string TEXT, and an `ArrayBuffer` or a typed array such as `Uint8Array` a BLOB. Other objects become NULL; return `JSON.stringify(value)` to keep one as TEXT. The parameters of `db.exec()` convert the same way.
+A JavaScript result goes back to SQL as follows: `null` and `undefined` become NULL, a boolean an INTEGER (1 or 0), a number an INTEGER if it is a whole number from -(2^53 - 1) to 2^53 - 1 (`Number.isSafeInteger`) and a REAL otherwise, a BigInt an INTEGER, a string TEXT, and an `ArrayBuffer` or a typed array such as `Uint8Array` a BLOB. Other objects become NULL; return `JSON.stringify(value)` to keep one as TEXT. The parameters of `db.exec()` convert the same way.
+
+JavaScript has a single number type, a double. So a REAL that holds a whole number, such as 3.0, comes back as the INTEGER 3, and an INTEGER beyond ±(2^53 - 1) loses precision in JavaScript: pass it as TEXT, `CAST(x AS TEXT)`, and convert it with `BigInt(args[0])`.
 
 ## Scalar Functions
 

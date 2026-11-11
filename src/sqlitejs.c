@@ -11,6 +11,7 @@
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
+#include <math.h>
 #include "sqlitejs.h"
 #include "quickjs.h"
 #include "quickjs-libc.h"
@@ -345,6 +346,18 @@ static void functionjs_free (functionjs_context *fctx) {
 
 // MARK: - Utils -
 
+// A JavaScript number is a double. QuickJS keeps the small whole numbers it can as 32-bit
+// integers, but an INTEGER outside that range, or the result of arithmetic such as 2.5 * 2,
+// is a double too. A whole number that a double holds exactly, from -(2^53 - 1) to 2^53 - 1
+// (Number.isSafeInteger), goes back to SQL as an INTEGER; any other number is a REAL.
+static bool js_number_to_int64 (double num, sqlite3_int64 *out) {
+    const double max_safe_integer = 9007199254740991.0;
+    // NaN fails both comparisons
+    if (!(num >= -max_safe_integer && num <= max_safe_integer) || (num != floor(num))) return false;
+    *out = (sqlite3_int64)num;
+    return true;
+}
+
 // Gets the bytes of an ArrayBuffer, or of the part of an ArrayBuffer that a typed array such
 // as a Uint8Array views: the forms a BLOB takes in JavaScript (a BLOB arrives as an
 // ArrayBuffer). Returns 1 and sets *pbytes and *psize if value is one of them (*pbytes may be
@@ -407,7 +420,9 @@ static int js_bind_value (JSContext *ctx, sqlite3_stmt *vm, int index, JSValueCo
             return sqlite3_bind_int(vm, index, num);
         } else {
             double num;
+            sqlite3_int64 inum;
             JS_ToFloat64(ctx, &num, val);
+            if (js_number_to_int64(num, &inum)) return sqlite3_bind_int64(vm, index, inum);
             return sqlite3_bind_double(vm, index, num);
         }
     }
@@ -633,8 +648,10 @@ static void js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
             sqlite3_result_int(context, num);
         } else {
             double num;
+            sqlite3_int64 inum;
             JS_ToFloat64(js_ctx, &num, value);
-            sqlite3_result_double(context, num);
+            if (js_number_to_int64(num, &inum)) sqlite3_result_int64(context, inum);
+            else sqlite3_result_double(context, num);
         }
         return;
     }

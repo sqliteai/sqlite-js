@@ -561,6 +561,48 @@ abort_test:
     return rc;
 }
 
+// MARK: - Numbers -
+
+int test_numbers (void) {
+    sqlite3 *db = NULL;
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    rc = db_exec(db, "SELECT js_create_scalar('identity', '(function(args){ return args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // integers keep their type and value through JavaScript, beyond the 32-bit range too
+    rc = check_query(db, "WITH v(x) AS (VALUES (0), (42), (-7), (2147483647), (2147483648), (-2147483649), (9007199254740991), (-9007199254740991)) SELECT group_concat(typeof(identity(x)) || ' ' || (identity(x) = x), ',') FROM v;", "integer 1,integer 1,integer 1,integer 1,integer 1,integer 1,integer 1,integer 1");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // REALs that are not whole numbers stay REAL; a whole number is an INTEGER, as JavaScript cannot tell 3.0 from 3
+    rc = check_query_v2(db, "SELECT quote(identity(3.5)), quote(identity(-0.25)), quote(identity(1e300)), quote(identity(3.0));", (const char*[]){"3.5", "-0.25", "1.0e+300", "3"}, 4);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // beyond 2^53 - 1 a double cannot hold every integer, so the result is a REAL
+    rc = check_query(db, "SELECT typeof(identity(9007199254740993));", "real");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // results of arithmetic
+    rc = check_query_v2(db, "SELECT quote(js_eval('2.5 * 2')), quote(js_eval('1e10')), typeof(js_eval('0.1 + 0.2')), typeof(js_eval('NaN'));", (const char*[]){"5", "10000000000", "real", "null"}, 4);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // an aggregate whose result is past the 32-bit range
+    rc = db_exec(db, "SELECT js_create_aggregate('js_sum', 'total = 0;', '(function(args){ total += args[0]; })', '(function(){ return total; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "WITH v(x) AS (VALUES (3000000000), (1)) SELECT typeof(js_sum(x)) || ' ' || js_sum(x) FROM v;", "integer 3000000001");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // db.exec() binds numbers the same way
+    rc = check_query(db, "SELECT js_eval('(function () { const rs = db.exec(\"SELECT typeof(?), typeof(?), typeof(?)\", 2147483648, 2.5 * 2, 2.5); rs.next(); return [rs.get(0), rs.get(1), rs.get(2)].join(); })()');", "integer,integer,real");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: -
 
 int test_report(const char *description, int rc){
@@ -578,6 +620,7 @@ int main (void) {
     result += test_report("Serialization 3", test_serialization(DB_PATH, true,  3)); // load the new implementations
     result += test_report("Thread", test_thread());
     result += test_report("Blobs", test_blobs());
+    result += test_report("Numbers", test_numbers());
 
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;
