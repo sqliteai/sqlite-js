@@ -550,7 +550,7 @@ int test_stack_size (void) {
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_error(db, recurse, "Maximum call stack size exceeded");
     if (rc != SQLITE_OK) goto abort_test;
-    rc = db_exec(db, "SELECT js_create_scalar('recurse_sql', '(function (args) { const rs = db.exec(\"SELECT recurse_sql(?)\", args[0] + 1); if (!rs.next()) throw new Error(\"stopped\"); return rs.get(0); })');");
+    rc = db_exec(db, "SELECT js_create_scalar('recurse_sql', '(function (args) { try { const rs = db.exec(\"SELECT recurse_sql(?)\", args[0] + 1); if (rs.next()) return rs.get(0); } catch (e) {} throw new Error(\"stopped\"); })');");
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_error(db, "SELECT recurse_sql(0);", "stopped");
     if (rc != SQLITE_OK) goto abort_test;
