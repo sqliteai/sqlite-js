@@ -489,6 +489,12 @@ FROM exam_results;
 
 Due to a constraint in [SQLite](https://www3.sqlite.org/src/info/cabab62bc10568d4), it is not possible to update or redefine a user-defined function using the same database connection that was used to initially register it. To modify an existing JavaScript function, the update must be performed through a separate database connection.
 
+## Functions in the Schema
+
+Every SQL function this extension registers, except `js_version`, runs JavaScript, reads files or changes the JavaScript runtime, so it is registered with `SQLITE_DIRECTONLY`: only top-level SQL can call it, never a view, trigger, CHECK constraint, generated column or index. That way a database from an untrusted source cannot run JavaScript just by being queried. The functions you create with `js_create_scalar`, `js_create_aggregate`, `js_create_window` and `js_create_collation` are not restricted.
+
+A database can still store JavaScript in its `js_functions` table, and `js_init_table(1)` runs it. Call it only on databases you trust.
+
 ## Function Naming Rules
 
 Function names must comply with SQLite identifier rules and must be unique within the database and its schema.
