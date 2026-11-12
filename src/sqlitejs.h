@@ -21,5 +21,6 @@
 int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
 const char *sqlitejs_version (void);
 const char *quickjs_version (void);
+void sqlitejs_cancel_all (void);
 
 #endif

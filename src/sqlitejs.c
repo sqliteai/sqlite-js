@@ -70,6 +70,8 @@ typedef struct {
     size_t              mem_peak;       // the most in use since the last result or error
     size_t              stack_size;     // in bytes, 0 for no check: see js_set_max_stack_size()
     int                 depth;          // calls into JavaScript in progress: see js_enter()
+    unsigned            cancel_epoch;   // js_cancel_epoch when the outermost call began
+    bool                check_interrupted;  // sqlite3_is_interrupted() is available
     struct rowset       *rowsets;       // result sets not yet freed: see js_end_rowsets()
     int                 orphans;        // of those, the ones whose JavaScript object is gone
     bool                ending_rowsets; // js_end_rowsets() is running
@@ -325,6 +327,30 @@ static void js_collect_below_limit (globaljs_context *js) {
     js_keep_gc_below_limit(js);
 }
 
+// Bumped by sqlitejs_cancel_all(): JavaScript that began before stops, as if interrupted.
+static unsigned js_cancel_epoch;
+
+static unsigned js_cancel_epoch_load (void) {
+#if defined(__clang__) || defined(__GNUC__)
+    return __atomic_load_n(&js_cancel_epoch, __ATOMIC_ACQUIRE);
+#else
+    return *(volatile unsigned *)&js_cancel_epoch;
+#endif
+}
+
+// Stops all JavaScript that is running now, in every connection: each call fails with an
+// "interrupted" error, and the statement that called it is interrupted. JavaScript that begins
+// afterwards runs normally. Safe from any thread.
+// For hosts whose own cancelling cannot reach JavaScript: Android cancels a query with a
+// progress handler, which SQLite never calls while a JavaScript function runs.
+void sqlitejs_cancel_all (void) {
+#if defined(__clang__) || defined(__GNUC__)
+    __atomic_add_fetch(&js_cancel_epoch, 1, __ATOMIC_RELEASE);
+#else
+    (*(volatile unsigned *)&js_cancel_epoch)++;
+#endif
+}
+
 // QuickJS calls this from time to time while it runs code. A non-zero result stops the code
 // with an uncatchable "interrupted" error, so sqlite3_interrupt() (Ctrl-C in the sqlite3 shell,
 // a cancelled query in an app) also stops JavaScript that never returns to SQLite.
@@ -332,7 +358,15 @@ static int js_interrupt_handler (JSRuntime *rt, void *opaque) {
     UNUSED(rt);
     globaljs_context *js = (globaljs_context *)opaque;
     js_keep_gc_below_limit(js);
-    return (js->db != NULL) && sqlite3_is_interrupted(js->db);
+    // Only a call (see js_enter) is cancelled: the JavaScript a connection runs while it is set
+    // up is not one, and stopping it would make the connection fail to load the extension.
+    if ((js->depth > 0) && (js->cancel_epoch != js_cancel_epoch_load())) {
+        // The statement is interrupted too: a collation cannot report an error, so the
+        // statement would go on calling JavaScript, each call beginning after the cancel.
+        if (js->db) sqlite3_interrupt(js->db);
+        return 1;
+    }
+    return js->check_interrupted && (js->db != NULL) && sqlite3_is_interrupted(js->db);
 }
 
 // The most memory, in bytes, the JavaScript runtime of a connection may allocate until
@@ -542,6 +576,7 @@ static bool js_stack_room (size_t *room) {
 // runs JavaScript) is on the same thread and keeps the outer call's limit.
 static void js_enter (globaljs_context *js) {
     if (js->depth++ > 0) return;
+    js->cancel_epoch = js_cancel_epoch_load();
     JS_UpdateStackTop(js->runtime);
     // A thread with less room than SQLITE_JS_STACK_MIN keeps it too: JavaScript there then fails
     // with "Maximum call stack size exceeded" rather than running past the end of the stack. A
@@ -577,8 +612,9 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     //JS_SetMaxStackSize(rt, 10 * 1024);
     
     // sqlite3_is_interrupted() is new in SQLite 3.41.0: an older library has no such entry
-    // in its sqlite3_api_routines, so JavaScript cannot be interrupted there
-    if (sqlite3_libversion_number() >= 3041000) JS_SetInterruptHandler(rt, js_interrupt_handler, js);
+    // in its sqlite3_api_routines, so JavaScript cannot be interrupted there, only cancelled
+    js->check_interrupted = (sqlite3_libversion_number() >= 3041000);
+    JS_SetInterruptHandler(rt, js_interrupt_handler, js);
     
     // the default stack size must fit in the stack of the thread that loads the extension: Windows
     // gives a main thread 1 MB, and apps often give their threads no more
