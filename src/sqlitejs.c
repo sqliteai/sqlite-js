@@ -1332,7 +1332,12 @@ APIEXPORT int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_r
     size_t f_count = sizeof(f_name) / sizeof(const char *);
     for (size_t i=0; i<f_count; ++i) {
         js->ref_count++;
-        int rc = sqlite3_create_function_v2(db, f_name[i], f_arg[i], SQLITE_UTF8, (void *)js, f_ptr[i], NULL, NULL, globaljs_dec_and_free_if_needed);
+        // Every function but js_version runs JavaScript, reads files or changes the JavaScript
+        // runtime. SQLITE_DIRECTONLY keeps them out of the schema (views, triggers, CHECK
+        // constraints, generated columns, indexes), so that a database from an untrusted source
+        // cannot run JavaScript just by being queried, whatever PRAGMA trusted_schema says.
+        int flags = (strcmp(f_name[i], "js_version") == 0) ? 0 : SQLITE_DIRECTONLY;
+        int rc = sqlite3_create_function_v2(db, f_name[i], f_arg[i], SQLITE_UTF8 | flags, (void *)js, f_ptr[i], NULL, NULL, globaljs_dec_and_free_if_needed);
         if (rc != SQLITE_OK) {
             if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Error creating function %s: %s", f_name[i], sqlite3_errmsg(db));
             // sqlite3_create_function_v2 always invokes the xDestroy callback when it fails,

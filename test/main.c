@@ -565,6 +565,58 @@ abort_test:
     return rc;
 }
 
+// MARK: - Direct only -
+
+int test_direct_only (void) {
+    sqlite3 *db = NULL;
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // every function but js_version is SQLITE_DIRECTONLY (0x80000 in the flags of function_list)
+    rc = check_query_v2(db, "SELECT count(*) > 10, sum(((flags & 0x80000) != 0) != (name <> 'js_version')) FROM pragma_function_list WHERE name LIKE 'js\\_%' ESCAPE '\\';", (const char*[]){"1", "0"}, 2);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // trusted_schema ON lets the schema use any function that is not SQLITE_DIRECTONLY
+    rc = db_exec(db, "PRAGMA trusted_schema = ON; CREATE TABLE t (a); CREATE TABLE log (msg);");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a view, a trigger and a generated column cannot run JavaScript or read files
+    // (SQLite reports these either when the schema is created or when it is used)
+    sqlite3_exec(db, "CREATE VIEW v_eval AS SELECT js_eval('6 * 7') AS x;", NULL, NULL, NULL);
+    rc = check_error(db, "SELECT x FROM v_eval;", "unsafe use of js_eval()");
+    if (rc != SQLITE_OK) goto abort_test;
+    sqlite3_exec(db, "CREATE VIEW v_load AS SELECT js_load_text('/etc/hosts') AS x;", NULL, NULL, NULL);
+    rc = check_error(db, "SELECT x FROM v_load;", "unsafe use of js_load_text()");
+    if (rc != SQLITE_OK) goto abort_test;
+    sqlite3_exec(db, "CREATE TRIGGER t_insert AFTER INSERT ON t BEGIN INSERT INTO log VALUES (js_eval('\"trigger ran\"')); END;", NULL, NULL, NULL);
+    rc = check_error(db, "INSERT INTO t VALUES (1);", "unsafe use of js_eval()");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT count(*) FROM log;", "0");
+    if (rc != SQLITE_OK) goto abort_test;
+    sqlite3_exec(db, "DROP TRIGGER IF EXISTS t_insert;", NULL, NULL, NULL);
+    if (sqlite3_exec(db, "CREATE TABLE g (a, b AS (js_eval('1')));", NULL, NULL, NULL) == SQLITE_OK) {
+        rc = check_error(db, "INSERT INTO g (a) VALUES (1);", "unsafe use of js_eval()");
+        if (rc != SQLITE_OK) goto abort_test;
+    }
+    
+    // a top-level statement can still use them
+    rc = check_query(db, "SELECT js_eval('6 * 7');", "42");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // and the schema can still use js_version() and the functions created with js_create_*
+    rc = db_exec(db, "SELECT js_create_scalar('twice', '(function(args){ return args[0] * 2; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "CREATE VIEW v_ok AS SELECT js_version() IS NOT NULL AS has_version, twice(21) AS answer;");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query_v2(db, "SELECT has_version, answer FROM v_ok;", (const char*[]){"1", "42"}, 2);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: -
 
 int test_report(const char *description, int rc){
@@ -582,6 +634,7 @@ int main (void) {
     result += test_report("Serialization 3", test_serialization(DB_PATH, true,  3)); // load the new implementations
     result += test_report("Thread", test_thread());
     result += test_report("Interrupt", test_interrupt());
+    result += test_report("Direct only", test_direct_only());
 
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;
