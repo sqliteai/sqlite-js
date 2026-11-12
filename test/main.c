@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <math.h>
 #include <string.h>
+#include <unistd.h>
 
 #define DB_PATH                 "js_functions.sqlite"
 #define VERBOSE                 1
@@ -512,6 +513,58 @@ abort_test:
     return rc;
 }
 
+// MARK: - Interrupt -
+
+void *test_interrupt_worker (void *ptr) {
+    // give the statement time to start running JavaScript
+    usleep(200 * 1000);
+    sqlite3_interrupt((sqlite3 *)ptr);
+    return NULL;
+}
+
+// Runs sql, which never ends unless it is interrupted, and interrupts it from another thread.
+// The statement must fail as interrupted, and the connection must stay usable.
+int test_interrupt_sql (sqlite3 *db, const char *sql) {
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, test_interrupt_worker, (void *)db) != 0) return SQLITE_ERROR;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    pthread_join(thread, NULL);
+    
+    if (rc == SQLITE_OK || strstr(sqlite3_errmsg(db), "interrupted") == NULL) {
+        printf("FAIL: %s\n      Expected: interrupted, Got: %d %s\n", sql, rc, sqlite3_errmsg(db));
+        return SQLITE_ERROR;
+    }
+    return check_query(db, "SELECT js_eval('1+1');", "2");
+}
+
+int test_interrupt (void) {
+    sqlite3 *db = NULL;
+    
+    // if the code cannot be interrupted, end the test program instead of hanging forever
+    alarm(30);
+    
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    rc = test_interrupt_sql(db, "SELECT js_eval('while (true) {}');");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    rc = db_exec(db, "SELECT js_create_scalar('forever', '(function(args){ for (;;) {} })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = test_interrupt_sql(db, "SELECT forever();");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // JavaScript catch blocks cannot keep running code alive
+    rc = test_interrupt_sql(db, "SELECT js_eval('for (;;) { try { while (true) {} } catch (e) {} }');");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+abort_test:
+    alarm(0);
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: - Memory limit -
 
 // Creates and runs an aggregate on a new connection with a memory limit of limit_kb, if not 0,
@@ -611,6 +664,7 @@ int main (void) {
     result += test_report("Serialization 2", test_serialization(DB_PATH, false, 2)); // update functions previously registered in the js_functions table
     result += test_report("Serialization 3", test_serialization(DB_PATH, true,  3)); // load the new implementations
     result += test_report("Thread", test_thread());
+    result += test_report("Interrupt", test_interrupt());
     result += test_report("Memory limit", test_memory_limit());
 
     sqlite3_int64 current = 0;

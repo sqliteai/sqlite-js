@@ -188,6 +188,15 @@ static void js_rowset_finalizer(JSRuntime *rt, JSValue val) {
 
 // MARK: - Initializer -
 
+// QuickJS calls this from time to time while it runs code. A non-zero result stops the code
+// with an uncatchable "interrupted" error, so sqlite3_interrupt() (Ctrl-C in the sqlite3 shell,
+// a cancelled query in an app) also stops JavaScript that never returns to SQLite.
+static int js_interrupt_handler (JSRuntime *rt, void *opaque) {
+    UNUSED(rt);
+    globaljs_context *js = (globaljs_context *)opaque;
+    return (js->db != NULL) && sqlite3_is_interrupted(js->db);
+}
+
 // The most memory, in bytes, the JavaScript runtime of a connection may allocate until
 // js_set_memory_limit() changes it; 0 means no limit. Without a limit, code that keeps
 // allocating takes all the memory of the process, which on a phone ends with the operating
@@ -209,6 +218,10 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     
     //JS_SetMemoryLimit(rt, 80 * 1024);
     //JS_SetMaxStackSize(rt, 10 * 1024);
+    
+    // sqlite3_is_interrupted() is new in SQLite 3.41.0: an older library has no such entry
+    // in its sqlite3_api_routines, so JavaScript cannot be interrupted there
+    if (sqlite3_libversion_number() >= 3041000) JS_SetInterruptHandler(rt, js_interrupt_handler, js);
     
     js_std_init_handlers(rt);
     JS_SetModuleLoaderFunc2(rt, NULL, js_module_loader, js_module_check_attributes, NULL);

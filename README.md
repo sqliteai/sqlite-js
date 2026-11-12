@@ -382,6 +382,10 @@ SELECT js_eval('Math.PI * Math.pow(5, 2)');
 SELECT js_eval('new Date(1629381600000).toLocaleDateString()');
 ```
 
+### Interrupting JavaScript
+
+JavaScript runs inside the SQL statement that calls it, so `sqlite3_interrupt()` stops it as it stops any statement: the statement fails with an "interrupted" error, even if the code catches exceptions. In the `sqlite3` shell, Ctrl-C does this. Interrupting JavaScript needs SQLite 3.41.0 or later.
+
 ## Utility Functions
 
 ### js_version
