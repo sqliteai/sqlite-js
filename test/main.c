@@ -554,6 +554,16 @@ int test_blobs (void) {
     // a typed array of fixed length that a shrunken buffer no longer holds is an error
     rc = check_error(db, "SELECT js_eval('(function () { const ab = new ArrayBuffer(16, { maxByteLength: 16 }); const u = new Uint8Array(ab, 0, 8); ab.resize(4); return u; })()');", "detached or resized");
     if (rc != SQLITE_OK) goto abort_test;
+
+    // db.exec() throws for a buffer it cannot read, as returning it fails, instead of binding NULL
+    rc = check_query_v2(db, "SELECT js_eval('(function () { const ab = new ArrayBuffer(16, { maxByteLength: 16 }); const u = new Uint8Array(ab, 0, 8); ab.resize(4); try { db.exec(\"SELECT ?\", u); return \"bound\"; } catch (e) { return e.message; } })()'), js_eval('(function () { const b = new ArrayBuffer(4); b.transfer(); try { db.exec(\"SELECT ?\", b); return \"bound\"; } catch (e) { return \"thrown\"; } })()');", (const char*[]){"ArrayBuffer is detached or resized", "thrown"}, 2);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // a view's own offset and length count, not properties a script defines over them
+    rc = check_query_v2(db, "SELECT quote(js_eval('(function () { const u = new Uint8Array([1, 2, 3]).subarray(1, 2); Object.defineProperty(u, \"byteOffset\", { value: 0 }); Object.defineProperty(u, \"byteLength\", { value: 3 }); return u; })()')), js_eval('(function () { const u = new Uint8Array([1, 2, 3]).subarray(1, 2); Object.defineProperty(u, \"byteOffset\", { value: 0 }); const rs = db.exec(\"SELECT quote(?)\", u); rs.next(); return rs.get(0); })()');", (const char*[]){"X'02'", "X'02'"}, 2);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT quote(js_eval('(function () { Object.defineProperty(Object.getPrototypeOf(Uint8Array.prototype), \"byteOffset\", { get() { return 0; } }); return new Uint8Array([1, 2, 3]).subarray(2); })()'));", "X'03'");
+    if (rc != SQLITE_OK) goto abort_test;
     
 abort_test:
     if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
