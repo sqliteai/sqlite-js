@@ -791,6 +791,9 @@ static void js_execute_common (sqlite3_context *context, JSContext *js_context, 
     JS_FreeValue(js_context, args);
     
     if (return_value) js_value_to_sqlite(context, js_context, result);
+    // step and inverse functions return nothing, but an exception they throw is still an error:
+    // reported from xStep or xInverse, it makes SQLite abort the statement
+    else if (JS_IsException(result)) js_error_to_sqlite(context, js_context, result, NULL);
     JS_FreeValue(js_context, result);
 }
 
