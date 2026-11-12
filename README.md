@@ -53,6 +53,7 @@
 - [Utility Functions](#utility-functions)
 - [Examples](#examples)
 - [Update Functions](#update-functions)
+- [Functions in the Schema](#functions-in-the-schema)
 - [Function Naming Rules](#function-naming-rules)
 - [Building from Source](#building-from-source)
 - [License](#license)
