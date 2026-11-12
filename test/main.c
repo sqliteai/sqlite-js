@@ -538,11 +538,29 @@ int test_interrupt_sql (sqlite3 *db, const char *sql) {
     return check_query(db, "SELECT js_eval('1+1');", "2");
 }
 
+// Ends the program if the test does not finish in time, instead of hanging forever when the
+// code cannot be interrupted. alarm() would do, but it is POSIX only and Windows has no such
+// thing, so this is a thread; test/main.c already needs pthreads.
+static volatile int test_watchdog_stop = 0;
+
+static void *test_watchdog (void *ptr) {
+    int tenths = *(int *)ptr * 10;
+    for (int i = 0; (i < tenths) && !test_watchdog_stop; ++i) usleep(100 * 1000);
+    if (!test_watchdog_stop) {
+        printf("FAIL: the test did not finish in %d seconds: JavaScript could not be interrupted\n", *(int *)ptr);
+        fflush(stdout);
+        abort();
+    }
+    return NULL;
+}
+
 int test_interrupt (void) {
     sqlite3 *db = NULL;
     
-    // if the code cannot be interrupted, end the test program instead of hanging forever
-    alarm(30);
+    int seconds = 30;
+    pthread_t watchdog;
+    test_watchdog_stop = 0;
+    bool watching = (pthread_create(&watchdog, NULL, test_watchdog, &seconds) == 0);
     
     int rc = test_open(&db);
     if (rc != SQLITE_OK) goto abort_test;
@@ -560,7 +578,8 @@ int test_interrupt (void) {
     if (rc != SQLITE_OK) goto abort_test;
     
 abort_test:
-    alarm(0);
+    test_watchdog_stop = 1;
+    if (watching) pthread_join(watchdog, NULL);
     if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
     if (db) sqlite3_close(db);
     return rc;
@@ -1010,6 +1029,23 @@ static void *stack_thread_open (void *ptr) {
     return NULL;
 }
 
+// Opens a connection and runs JavaScript on a thread whose whole stack is smaller than twice
+// SQLITE_JS_STACK_MARGIN, so that keeping the margin free would leave JavaScript no room at all.
+// The extension must still load and work: a stack size of 0 would turn QuickJS's check off and
+// one of a few bytes stops every program, including the code that creates a context, which once
+// made the extension fail to load at all.
+static void *stack_thread_tiny (void *ptr) {
+    stack_thread_args *args = (stack_thread_args *)ptr;
+    sqlite3 *db = NULL;
+    args->rc = test_open(&db);
+    if (args->rc == SQLITE_OK) args->rc = check_query(db, "SELECT js_eval('6 * 7');", "42");
+    // and runaway recursion must still stop with an error rather than crash
+    if (args->rc == SQLITE_OK) args->rc = stack_thread_functions(db);
+    if (args->rc == SQLITE_OK) args->rc = check_error(db, "SELECT forever();", "Maximum call stack size exceeded");
+    if (db) sqlite3_close(db);
+    return NULL;
+}
+
 // Runs fn(args) on a new thread with a stack of stack_size bytes, or the default if 0.
 static int stack_thread (void *(*fn)(void *), stack_thread_args *args, size_t stack_size) {
     pthread_attr_t attr;
@@ -1057,6 +1093,10 @@ int test_stack_threads (void) {
     if (rc != SQLITE_OK) goto abort_test;
     stack_thread_run(&args);
     rc = args.rc;
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // a thread whose whole stack is under twice the margin still gets a usable runtime
+    rc = stack_thread(stack_thread_tiny, &args, 256 * 1024);
 
 abort_test:
     if (rc != SQLITE_OK && args.db) printf("Error: %s\n", sqlite3_errmsg(args.db));

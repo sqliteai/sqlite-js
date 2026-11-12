@@ -33,6 +33,11 @@
 #endif
 #elif defined(__APPLE__) || defined(__linux__)
 #include <pthread.h>
+#if defined(__linux__)
+#include <unistd.h>             // getpid, for the initial thread in js_stack_low
+#include <sys/syscall.h>        // SYS_gettid
+#include <sys/resource.h>       // RLIMIT_STACK
+#endif
 #endif
 
 #ifndef SQLITE_CORE
@@ -349,6 +354,14 @@ static void js_mem_reset_peak (globaljs_context *js) {
 #define SQLITE_JS_STACK_MARGIN  (256 * 1024)
 #endif
 
+// The least stack worth giving JavaScript. QuickJS cannot even create a context below about
+// 16 KB (measured: 4 KB fails, 16 KB works), and it reads 0 as "no check at all", so a smaller
+// measurement is treated as no measurement and leaves the default alone. Failing to catch
+// runaway recursion is the lesser evil next to an extension that cannot load.
+#ifndef SQLITE_JS_STACK_MIN
+#define SQLITE_JS_STACK_MIN     (32 * 1024)
+#endif
+
 // The lowest address of the calling thread's stack, found once per thread: on Linux, finding the
 // main thread's stack reads /proc/self/maps. Returns false where the stack cannot be found.
 static bool js_stack_low (uintptr_t sp, uintptr_t *low) {
@@ -375,6 +388,17 @@ static bool js_stack_low (uintptr_t sp, uintptr_t *low) {
     pthread_attr_destroy(&attr);
     if (rc != 0) { thread_unknown = true; return false; }
     thread_low = (uintptr_t)addr;
+    // For the initial thread, musl reports the part of the stack that is mapped so far, which
+    // grows as the stack is used, rather than the stack it may still grow to: 132 KB at load
+    // time, where the process may use 8 MB. (glibc reads /proc/self/maps and reports all of it.)
+    // RLIMIT_STACK is how far it may grow, so for that thread it is the bound that counts.
+    if (syscall(SYS_gettid) == (long)getpid()) {
+        struct rlimit limit;
+        if ((getrlimit(RLIMIT_STACK, &limit) == 0) && (limit.rlim_cur != RLIM_INFINITY)) {
+            uintptr_t grows_to = (sp > (uintptr_t)limit.rlim_cur) ? sp - (uintptr_t)limit.rlim_cur : 0;
+            if (grows_to < thread_low) thread_low = grows_to;
+        }
+    }
 #else
     UNUSED(sp);
     thread_unknown = true;
@@ -401,7 +425,11 @@ static bool js_stack_room (size_t *room) {
 #endif
     uintptr_t low = 0;
     if (!js_stack_low(sp, &low)) return false;
-    *room = (sp > low + SQLITE_JS_STACK_MARGIN) ? (size_t)(sp - low - SQLITE_JS_STACK_MARGIN) : 0;
+    // The margin is for the native code that runs between two of QuickJS's stack checks, but on
+    // a stack smaller than twice the margin, keeping all of it would leave JavaScript nothing,
+    // so the stack is split instead of reported as no room at all.
+    size_t have = (sp > low) ? (size_t)(sp - low) : 0;
+    *room = (have > 2 * SQLITE_JS_STACK_MARGIN) ? have - SQLITE_JS_STACK_MARGIN : have / 2;
     return true;
 }
 
@@ -416,7 +444,7 @@ static void js_enter (globaljs_context *js) {
     if (js->depth++ > 0) return;
     JS_UpdateStackTop(js->runtime);
     size_t size = js->stack_size, room = 0;
-    if ((size > 0) && js_stack_room(&room) && (room < size)) size = (room > 0) ? room : 1;
+    if ((size > 0) && js_stack_room(&room) && (room >= SQLITE_JS_STACK_MIN) && (room < size)) size = room;
     JS_SetMaxStackSize(js->runtime, size);
 }
 
@@ -447,7 +475,7 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     // the default stack size must fit in the stack of the thread that loads the extension: Windows
     // gives a main thread 1 MB, and apps often give their threads no more
     size_t room = 0;
-    if (js_stack_room(&room) && (room < JS_DEFAULT_STACK_SIZE)) JS_SetMaxStackSize(rt, (room > 0) ? room : 1);
+    if (js_stack_room(&room) && (room >= SQLITE_JS_STACK_MIN) && (room < JS_DEFAULT_STACK_SIZE)) JS_SetMaxStackSize(rt, room);
 
     js_std_init_handlers(rt);
     JS_SetModuleLoaderFunc2(rt, NULL, js_module_loader, js_module_check_attributes, NULL);
@@ -1703,8 +1731,9 @@ void js_set_max_stack_size (sqlite3_context *context, int argc, sqlite3_value **
     // read as 0, and a size larger than the thread's stack is no limit either: code that calls
     // itself without end would crash the process. Where the stack cannot be measured, allow up
     // to the default.
-    size_t most = JS_DEFAULT_STACK_SIZE;
-    js_stack_room(&most);
+    // an unusable measurement allows up to the default, as an unmeasurable stack does
+    size_t most = JS_DEFAULT_STACK_SIZE, room = 0;
+    if (js_stack_room(&room) && (room >= SQLITE_JS_STACK_MIN)) most = room;
     sqlite3_int64 size = sqlite3_value_int64(argv[0]);
     if ((sqlite3_value_type(argv[0]) != SQLITE_INTEGER) || (size < 0) || ((sqlite3_uint64)size > most)) {
         char *msg = sqlite3_mprintf("The stack size must be an integer number of bytes from 1 to %llu, which this thread's stack allows, or 0 for no check", (unsigned long long)most);
