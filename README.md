@@ -416,7 +416,7 @@ SELECT js_set_max_stack_size(1048576);  -- Set max stack size to 1 MB
 
 ### js_set_memory_limit
 
-Sets the most memory, in bytes, that JavaScript may allocate on this connection; 0 means no limit. The default is 64 MB (64 × 1024 × 1024 bytes); build with `-DSQLITE_JS_DEFAULT_MEMORY_LIMIT=bytes` to change it. Code that needs more fails with an "out of memory" error, and the connection stays usable.
+Sets the most memory, in bytes, that JavaScript may allocate on this connection; 0 means no limit. The default is 64 MB (64 × 1024 × 1024 bytes); build with `-DSQLITE_JS_DEFAULT_MEMORY_LIMIT=bytes` to change it. Code that needs more fails with an "out of memory" error, and the connection stays usable. JavaScript that catches the error receives `null` instead when the limit leaves no room even for the error.
 
 ```sql
 SELECT js_set_memory_limit(268435456);  -- Allow 256 MB

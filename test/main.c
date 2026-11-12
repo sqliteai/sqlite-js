@@ -622,6 +622,27 @@ int test_memory_limit (void) {
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_error(db, "SELECT js_eval('new ArrayBuffer(16 * 1024 * 1024).byteLength');", "out of memory");
     if (rc != SQLITE_OK) goto abort_test;
+
+    // garbage is still collected with more than two thirds of the limit in use: with 12 of 16 MB
+    // held, code that makes many times the free memory in cyclic garbage, which only the
+    // collector frees, runs
+    rc = db_exec(db, "SELECT js_set_memory_limit(16 * 1024 * 1024);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('globalThis.keep = new ArrayBuffer(12 * 1024 * 1024); for (let i = 0; i < 300000; i++) { const o = {}; o.o = o; } keep.byteLength');", "12582912");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_create_aggregate('n_rows', 'n = 0;', '(function(args){ n++; })', '(function(){ return n; })');", "0");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "WITH RECURSIVE g(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM g WHERE x < 300) SELECT sum(c) FROM (SELECT n_rows(x) AS c FROM g GROUP BY x);", "300");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_eval('delete globalThis.keep; 0');");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // running out of memory through many small allocations, which leaves no room for the error
+    // object, is reported as "out of memory" too
+    rc = check_error(db, "SELECT js_eval('(function () { let h = null; for (;;) h = {n: h}; })()');", "out of memory");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('1 + 1');", "2");
+    if (rc != SQLITE_OK) goto abort_test;
     
     // only a non-negative integer is a limit
     const char *invalid[] = {"-1", "1.5", "'1000000'", "NULL", "x'00'"};

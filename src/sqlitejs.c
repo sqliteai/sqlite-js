@@ -11,6 +11,11 @@
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(_WIN32) || defined(__linux__) || defined(__ANDROID__) || defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include "sqlitejs.h"
 #include "quickjs.h"
 #include "quickjs-libc.h"
@@ -32,6 +37,9 @@ typedef struct {
     JSClassID           rowSetClassID;
     int                 ref_count;
     size_t              memory_limit;   // in bytes, 0 for none: see js_set_memory_limit()
+    size_t              gc_threshold;   // QuickJS's GC threshold when last checked: see js_keep_gc_below_limit()
+    size_t              mem_used;       // memory the runtime has allocated: see js_mem_malloc()
+    size_t              mem_peak;       // the most in use since the last result or error
 } globaljs_context;
 
 typedef struct {
@@ -188,12 +196,31 @@ static void js_rowset_finalizer(JSRuntime *rt, JSValue val) {
 
 // MARK: - Initializer -
 
+// QuickJS collects cyclic garbage only when its memory use passes a threshold, which it resets
+// after each collection to 1.5 times the memory still in use. With more than two thirds of the
+// memory limit in use, that is beyond the limit: garbage would fill the rest, and code that fits
+// in the limit would fail. So the threshold is lowered to halfway between the memory in use and
+// the limit. Called often, so it does nothing until a collection has changed the threshold.
+static void js_keep_gc_below_limit (globaljs_context *js) {
+    size_t threshold = JS_GetGCThreshold(js->runtime);
+    if (threshold == js->gc_threshold) return;
+    size_t limit = js->memory_limit;
+    if ((limit > 0) && (threshold > limit - limit / 4)) {
+        size_t used = threshold / 3 * 2;
+        if (used > limit) used = limit;
+        threshold = used + (limit - used) / 2;
+        JS_SetGCThreshold(js->runtime, threshold);
+    }
+    js->gc_threshold = threshold;
+}
+
 // QuickJS calls this from time to time while it runs code. A non-zero result stops the code
 // with an uncatchable "interrupted" error, so sqlite3_interrupt() (Ctrl-C in the sqlite3 shell,
 // a cancelled query in an app) also stops JavaScript that never returns to SQLite.
 static int js_interrupt_handler (JSRuntime *rt, void *opaque) {
     UNUSED(rt);
     globaljs_context *js = (globaljs_context *)opaque;
+    js_keep_gc_below_limit(js);
     return (js->db != NULL) && sqlite3_is_interrupted(js->db);
 }
 
@@ -205,6 +232,71 @@ static int js_interrupt_handler (JSRuntime *rt, void *opaque) {
 #define SQLITE_JS_DEFAULT_MEMORY_LIMIT  (64 * 1024 * 1024)
 #endif
 
+// The runtime's allocator: the system's, as QuickJS's default is, counting the memory in use the
+// way QuickJS counts it against the memory limit, and the most in use since the last result or
+// error (see js_reached_memory_limit). QuickJS refuses an allocation over the limit before it
+// gets here.
+#if defined(__APPLE__)
+#define js_mem_usable_size(ptr)     malloc_size(ptr)
+#define JS_MEM_OVERHEAD             0
+#elif defined(_WIN32)
+#define js_mem_usable_size(ptr)     _msize((void *)(ptr))
+#define JS_MEM_OVERHEAD             8
+#elif defined(__linux__) || defined(__ANDROID__) || defined(__GLIBC__)
+#define js_mem_usable_size(ptr)     malloc_usable_size((void *)(ptr))
+#define JS_MEM_OVERHEAD             8
+#else
+#define js_mem_usable_size(ptr)     ((size_t)0)
+#define JS_MEM_OVERHEAD             0
+#endif
+
+static void js_mem_add (globaljs_context *js, void *ptr) {
+    if (!ptr) return;
+    js->mem_used += js_mem_usable_size(ptr) + JS_MEM_OVERHEAD;
+    if (js->mem_used > js->mem_peak) js->mem_peak = js->mem_used;
+}
+
+static void js_mem_sub (globaljs_context *js, void *ptr) {
+    if (ptr) js->mem_used -= js_mem_usable_size(ptr) + JS_MEM_OVERHEAD;
+}
+
+static void *js_mem_calloc (void *opaque, size_t count, size_t size) {
+    void *ptr = calloc(count, size);
+    js_mem_add((globaljs_context *)opaque, ptr);
+    return ptr;
+}
+
+static void *js_mem_malloc (void *opaque, size_t size) {
+    void *ptr = malloc(size);
+    js_mem_add((globaljs_context *)opaque, ptr);
+    return ptr;
+}
+
+static void js_mem_free (void *opaque, void *ptr) {
+    js_mem_sub((globaljs_context *)opaque, ptr);
+    free(ptr);
+}
+
+static void *js_mem_realloc (void *opaque, void *ptr, size_t size) {
+    globaljs_context *js = (globaljs_context *)opaque;
+    size_t old = (ptr) ? js_mem_usable_size(ptr) + JS_MEM_OVERHEAD : 0;
+    void *new_ptr = realloc(ptr, size);
+    if (!new_ptr && size) return NULL; // the old block is unchanged
+    js->mem_used -= old;
+    js_mem_add(js, new_ptr);
+    return new_ptr;
+}
+
+static size_t js_mem_size (const void *ptr) {
+    return js_mem_usable_size(ptr);
+}
+
+static const JSMallocFunctions js_mem_funcs = {js_mem_calloc, js_mem_malloc, js_mem_free, js_mem_realloc, js_mem_size};
+
+static void js_mem_reset_peak (globaljs_context *js) {
+    if (js) js->mem_peak = js->mem_used;
+}
+
 static globaljs_context *globaljs_init (sqlite3 *db) {
     JSRuntime *rt = NULL;
     JSContext *ctx = NULL;
@@ -213,7 +305,7 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     if (!js) return NULL;
     memset(js, 0, sizeof(globaljs_context));
     
-    rt = JS_NewRuntime();
+    rt = JS_NewRuntime2(&js_mem_funcs, js);
     if (!rt) goto abort_init;
     
     //JS_SetMemoryLimit(rt, 80 * 1024);
@@ -557,6 +649,12 @@ static void js_dump_globals (JSContext *ctx) {
 }
 #endif
 
+// True if JavaScript reached its memory limit since the last result or error. QuickJS then may
+// have had no memory left to make its "out of memory" error, and have thrown null instead.
+static bool js_reached_memory_limit (globaljs_context *js) {
+    return js && (js->memory_limit > 0) && (js->mem_peak + 64 * 1024 >= js->memory_limit);
+}
+
 static void js_error_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSValue value, const char *default_error) {
     if (!default_error) default_error = "Unknown JavaScript exception";
     const char *err_msg = NULL;
@@ -572,8 +670,11 @@ static void js_error_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
             JS_FreeValue(js_ctx, message);
         } else if (JS_IsString(exception)) {
             err_msg = JS_ToCString(js_ctx, exception);
+        } else if (JS_IsNull(exception) && js_reached_memory_limit(JS_GetContextOpaque(js_ctx))) {
+            default_error = "out of memory";
         }
     }
+    js_mem_reset_peak(JS_GetContextOpaque(js_ctx));
 
     // set a default error message and code
     sqlite3_result_error(context, (err_msg) ? err_msg : default_error, -1);
@@ -590,6 +691,7 @@ static void js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
         js_error_to_sqlite(context, js_ctx, value, NULL);
         return;
     }
+    js_mem_reset_peak(JS_GetContextOpaque(js_ctx));
     
     // check for null or undefined
     if (JS_IsNull(value) || JS_IsUndefined(value)) {
@@ -669,6 +771,9 @@ static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, 
     }
     
     // create a separate context for testing purpose
+    // Each finished aggregate leaves its context behind as cyclic garbage, so the collector must
+    // be able to run before the limit is reached.
+    js_keep_gc_below_limit(js);
     // QuickJS cannot always recover from running out of memory while it creates a context: it
     // can crash. So the context is created without the memory limit (it takes about 54 KB),
     // which then applies again to the code that runs in it.
@@ -680,6 +785,7 @@ static bool js_setup_aggregate (sqlite3_context *context, globaljs_context *js, 
         js_global_init(ctx, js);
     }
     JS_SetMemoryLimit(js->runtime, js->memory_limit);
+    js_mem_reset_peak(js);
     if (!ctx) {
         sqlite3_result_error(context, "Unable to create a JS context.", -1);
         return false;
@@ -1338,6 +1444,8 @@ void js_set_memory_limit (sqlite3_context *context, int argc, sqlite3_value **ar
     sqlite3_uint64 limit = (sqlite3_uint64)sqlite3_value_int64(argv[0]);
     js->memory_limit = (limit > SIZE_MAX) ? 0 : (size_t)limit;
     JS_SetMemoryLimit(js->runtime, js->memory_limit);
+    js->gc_threshold = 0;   // check the GC threshold against the new limit
+    js_keep_gc_below_limit(js);
 }
 
 // MARK: -
