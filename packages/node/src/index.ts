@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import * as nodeModule from 'node:module';
 import {
   getCurrentPlatform,
   getPlatformPackageName,
@@ -19,7 +19,13 @@ export class ExtensionNotFoundError extends Error {
     super(message);
     this.name = 'ExtensionNotFoundError';
     if (options && 'cause' in options) {
-      this.cause = options.cause;
+      // Non-enumerable, like the native `Error` `cause`
+      Object.defineProperty(this, 'cause', {
+        value: options.cause,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
     }
   }
 }
@@ -45,17 +51,63 @@ function isPackageNotFound(error: unknown, packageName: string): boolean {
 }
 
 /**
+ * True when `require` cannot be used in the current module format: in the ESM
+ * build the bundler turns `require` into a shim that throws this error when no
+ * real `require` exists at runtime.
+ */
+function isRequireUnavailable(error: unknown): boolean {
+  if (error instanceof ReferenceError) {
+    return true; // `require is not defined`
+  }
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && /^Dynamic require of ".*" is not supported$/.test(message);
+}
+
+/**
+ * Loads `packageName`, trying each way of resolving it that the current
+ * module format and bundler allow:
+ *
+ * 1. `require`: available in the CommonJS build and in CommonJS bundles that
+ *    compile the ESM build (esbuild, webpack), where it resolves relative to
+ *    the running bundle.
+ * 2. `createRequire(import.meta.url)`: native ES modules, where there is no
+ *    `require`, and webpack bundles, which cannot follow a dynamic
+ *    `require(name)`. Skipped when a bundler left `import.meta.url` empty.
+ *    `createRequire` is reached through a namespace import so that webpack
+ *    does not rewrite the call statically.
+ *
+ * Moves on to the next way only when `require` is unavailable or the package
+ * was not found; any other error is thrown as is.
+ */
+function requirePlatformPackage(packageName: string): unknown {
+  let notFound: unknown;
+
+  try {
+    return require(packageName);
+  } catch (error) {
+    if (isPackageNotFound(error, packageName)) {
+      notFound = error;
+    } else if (!isRequireUnavailable(error)) {
+      throw error;
+    }
+  }
+
+  const moduleUrl: unknown = import.meta.url;
+  if (typeof moduleUrl === 'string' && moduleUrl !== '') {
+    return nodeModule.createRequire(moduleUrl)(packageName);
+  }
+
+  throw notFound ?? new Error(`Cannot load "${packageName}": no require function is available`);
+}
+
+/**
  * Attempts to load the platform-specific package
  */
 function tryLoadPlatformPackage(packageName: string): PlatformPackageResult {
   let platformPackage: { path?: unknown } | undefined;
 
   try {
-    // A bare `require` is not available in the ESM build, so create one that
-    // resolves relative to this module. tsup shims `import.meta.url` in the
-    // CommonJS build, so the same code works in both formats.
-    const localRequire = createRequire(import.meta.url);
-    platformPackage = localRequire(packageName);
+    platformPackage = requirePlatformPackage(packageName) as typeof platformPackage;
   } catch (error) {
     if (isPackageNotFound(error, packageName)) {
       // Expected when the optional dependency was not installed

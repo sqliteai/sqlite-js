@@ -6,7 +6,9 @@
  * problems that only appear in the bundled output, such as a CommonJS-only
  * construct leaking into the ESM build. This script installs the built package
  * and a stub platform package into a temporary project, then loads it through
- * both `import` and `require`, exactly as a consumer would.
+ * both `import` and `require`, exactly as a consumer would, both directly and
+ * after bundling the consumer with esbuild (which compiles `import` consumers
+ * to CommonJS, a setup where `import.meta.url` is not available).
  *
  * Run after `npm run build`:  npm run test:dist
  */
@@ -14,13 +16,16 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { build } from 'esbuild';
 
 const packageDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = join(packageDir, 'dist');
 const manifest = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
 
-const { getPlatformPackageName, getBinaryName } = await import(join(distDir, 'index.mjs'));
+const { getPlatformPackageName, getBinaryName } = await import(
+  pathToFileURL(join(distDir, 'index.mjs')).href
+);
 const platformPackageName = getPlatformPackageName();
 
 // realpath: on macOS the temp dir is behind a symlink (/var -> /private/var)
@@ -53,29 +58,54 @@ function uninstallPlatformPackage() {
   rmSync(platformDir, { recursive: true, force: true });
 }
 
-// Prints the outcome of getExtensionPath() as JSON, for both module formats.
-const probe = {
-  esm: `
-    import { getExtensionPath } from ${JSON.stringify(manifest.name)};
-    try {
-      console.log(JSON.stringify({ path: getExtensionPath() }));
-    } catch (e) {
-      console.log(JSON.stringify({ name: e.name, message: e.message, cause: e.cause?.message }));
-    }
-  `,
-  cjs: `
-    const { getExtensionPath } = require(${JSON.stringify(manifest.name)});
-    try {
-      console.log(JSON.stringify({ path: getExtensionPath() }));
-    } catch (e) {
-      console.log(JSON.stringify({ name: e.name, message: e.message, cause: e.cause?.message }));
-    }
-  `,
-};
+// Prints the outcome of getExtensionPath() as JSON.
+const probeBody = `
+  try {
+    console.log(JSON.stringify({ path: getExtensionPath() }));
+  } catch (e) {
+    console.log(JSON.stringify({ name: e.name, message: e.message, cause: e.cause?.message }));
+  }
+`;
 
-function run(format) {
-  const args = format === 'esm' ? ['--input-type=module', '-e', probe.esm] : ['-e', probe.cjs];
-  const result = spawnSync(process.execPath, args, { cwd: projectDir, encoding: 'utf8' });
+// Each way a consumer can load the package: [label, script run with node].
+const consumers = [
+  ['import', 'probe-import.mjs'],
+  ['require', 'probe-require.cjs'],
+  ['import, esbuild bundle to cjs', join('bundles', 'import-cjs.cjs')],
+  ['import, esbuild bundle to esm', join('bundles', 'import-esm.mjs')],
+  ['require, esbuild bundle to cjs', join('bundles', 'require-cjs.cjs')],
+];
+
+async function writeConsumers() {
+  writeFileSync(
+    join(projectDir, 'probe-import.mjs'),
+    `import { getExtensionPath } from ${JSON.stringify(manifest.name)};\n${probeBody}`
+  );
+  writeFileSync(
+    join(projectDir, 'probe-require.cjs'),
+    `const { getExtensionPath } = require(${JSON.stringify(manifest.name)});\n${probeBody}`
+  );
+
+  const bundles = [
+    ['probe-import.mjs', 'cjs', 'import-cjs.cjs'],
+    ['probe-import.mjs', 'esm', 'import-esm.mjs'],
+    ['probe-require.cjs', 'cjs', 'require-cjs.cjs'],
+  ];
+  for (const [entry, format, outfile] of bundles) {
+    await build({
+      absWorkingDir: projectDir,
+      entryPoints: [entry],
+      outfile: join('bundles', outfile),
+      bundle: true,
+      platform: 'node',
+      format,
+      logLevel: 'error',
+    });
+  }
+}
+
+function run(script) {
+  const result = spawnSync(process.execPath, [script], { cwd: projectDir, encoding: 'utf8' });
   if (result.status !== 0) {
     throw new Error(`node exited with ${result.status}:\n${result.stderr}`);
   }
@@ -83,14 +113,14 @@ function run(format) {
 }
 
 function check(description, assertion) {
-  for (const format of ['esm', 'cjs']) {
-    const label = `${description} (${format})`;
+  for (const [label, script] of consumers) {
+    const name = `${description} (${label})`;
     try {
-      assertion(run(format));
-      console.log(`  ✓ ${label}`);
+      assertion(run(script));
+      console.log(`  ✓ ${name}`);
     } catch (error) {
       failures++;
-      console.error(`  ✗ ${label}\n    ${error.message.replace(/\n/g, '\n    ')}`);
+      console.error(`  ✗ ${name}\n    ${error.message.replace(/\n/g, '\n    ')}`);
     }
   }
 }
@@ -101,6 +131,7 @@ function expect(condition, message) {
 
 try {
   installMainPackage();
+  await writeConsumers();
   console.log(`Smoke testing ${manifest.name} dist/ with ${platformPackageName}`);
 
   installPlatformPackage(
