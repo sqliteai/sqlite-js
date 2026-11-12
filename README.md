@@ -588,6 +588,10 @@ make PLATFORM=windows
 make install
 ```
 
+## License
+
+SQLite-JS is released under the [Apache License 2.0](LICENSE).
+
 ---
 
 ## ☁️ Hosted version
