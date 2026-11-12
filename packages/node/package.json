@@ -26,6 +26,7 @@
     "build": "tsup",
     "prepublishOnly": "npm run build",
     "test": "vitest",
+    "test:dist": "node scripts/smoke-test-dist.mjs",
     "typecheck": "tsc --noEmit",
     "generate-platforms": "node generate-platform-packages.js"
   },
