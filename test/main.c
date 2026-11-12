@@ -578,6 +578,90 @@ int test_report(const char *description, int rc){
     return (rc == SQLITE_OK) ? 0 : 1;
 }
 
+// MARK: - Stack on other threads -
+
+typedef struct {
+    sqlite3     *db;
+    int         depth;      // how deep deep() is asked to go
+    int         rc;
+} stack_thread_args;
+
+// Creates deep(n), which calls itself n levels deep, and forever(), which calls itself without end.
+static int stack_thread_functions (sqlite3 *db) {
+    int rc = db_exec(db, "SELECT js_create_scalar('deep', '(function (args) { return (function f(n) { return (n === 0) ? 0 : 1 + f(n - 1); })(args[0]); })');");
+    if (rc != SQLITE_OK) return rc;
+    return db_exec(db, "SELECT js_create_scalar('forever', '(function (args) { return (function f(n) { return f(n + 1); })(0); })');");
+}
+
+// Runs deep() and forever() on the calling thread: deep() returns its depth, and forever() stops
+// with an error instead of crashing.
+static void *stack_thread_run (void *ptr) {
+    stack_thread_args *args = (stack_thread_args *)ptr;
+    char sql[64], expected[16];
+    snprintf(sql, sizeof(sql), "SELECT deep(%d);", args->depth);
+    snprintf(expected, sizeof(expected), "%d", args->depth);
+    args->rc = check_query(args->db, sql, expected);
+    if (args->rc == SQLITE_OK) args->rc = check_error(args->db, "SELECT forever();", "Maximum call stack size exceeded");
+    return NULL;
+}
+
+static void *stack_thread_open (void *ptr) {
+    stack_thread_args *args = (stack_thread_args *)ptr;
+    args->rc = test_open(&args->db);
+    if (args->rc == SQLITE_OK) args->rc = stack_thread_functions(args->db);
+    return NULL;
+}
+
+// Runs fn(args) on a new thread with a stack of stack_size bytes, or the default if 0.
+static int stack_thread (void *(*fn)(void *), stack_thread_args *args, size_t stack_size) {
+    pthread_attr_t attr;
+    pthread_t thread;
+    if (pthread_attr_init(&attr) != 0) return SQLITE_ERROR;
+    if (stack_size > 0 && pthread_attr_setstacksize(&attr, stack_size) != 0) { pthread_attr_destroy(&attr); return SQLITE_ERROR; }
+    int rc = pthread_create(&thread, &attr, fn, args);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) return SQLITE_ERROR;
+    pthread_join(thread, NULL);
+    return args->rc;
+}
+
+// A connection runs on whichever thread calls it, as in an app's connection pool. QuickJS measured
+// the stack from the thread that opened the connection, so on another thread JavaScript failed at
+// once with "Maximum call stack size exceeded", or code that called itself without end crashed.
+int test_stack_threads (void) {
+    // each level of JavaScript recursion takes about 1.5 KB of native stack, and the small stack
+    // below leaves about 250 KB after SQLITE_JS_STACK_MARGIN
+    stack_thread_args args = {NULL, 100, SQLITE_OK};
+
+    // opened on this thread, used on another
+    int rc = test_open(&args.db);
+    if (rc == SQLITE_OK) rc = stack_thread_functions(args.db);
+    if (rc == SQLITE_OK) rc = stack_thread(stack_thread_run, &args, 0);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // and on another thread with a small stack, where the size is lowered to fit
+    rc = stack_thread(stack_thread_run, &args, 512 * 1024);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // and back on this thread
+    stack_thread_run(&args);
+    rc = args.rc;
+    if (rc != SQLITE_OK) goto abort_test;
+    sqlite3_close(args.db);
+    args.db = NULL;
+
+    // opened on another thread, used on this one
+    rc = stack_thread(stack_thread_open, &args, 0);
+    if (rc != SQLITE_OK) goto abort_test;
+    stack_thread_run(&args);
+    rc = args.rc;
+
+abort_test:
+    if (rc != SQLITE_OK && args.db) printf("Error: %s\n", sqlite3_errmsg(args.db));
+    if (args.db) sqlite3_close(args.db);
+    return rc;
+}
+
 int main (void) {
     printf("SQLite-JS version: %s (engine: %s)\n\n", sqlitejs_version(), quickjs_version());
     int result = 0;
@@ -588,6 +672,7 @@ int main (void) {
     result += test_report("Serialization 3", test_serialization(DB_PATH, true,  3)); // load the new implementations
     result += test_report("Thread", test_thread());
     result += test_report("Stack size", test_stack_size());
+    result += test_report("Stack on other threads", test_stack_threads());
 
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;
