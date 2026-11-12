@@ -840,18 +840,44 @@ int test_memory_limit (void) {
     rc = check_error(db, "SELECT js_eval('new ArrayBuffer(16 * 1024 * 1024).byteLength');", "out of memory");
     if (rc != SQLITE_OK) goto abort_test;
 
-    // garbage is still collected with more than two thirds of the limit in use: with 12 of 16 MB
+    // garbage is still collected with more than two thirds of the limit in use: with 48 of 64 MB
     // held, code that makes many times the free memory in cyclic garbage, which only the
-    // collector frees, runs
-    rc = db_exec(db, "SELECT js_set_memory_limit(16 * 1024 * 1024);");
+    // collector frees, runs.
+    // On a connection of its own, and with megabytes to spare: running out of memory leaves some
+    // memory allocated and reachable, and how much an object costs is up to the allocator of the
+    // platform, which rounds allocations up by more once the heap of the process is warm.
+    if (db) sqlite3_close(db);
+    db = NULL;
+    rc = test_open(&db);
     if (rc != SQLITE_OK) goto abort_test;
-    rc = check_query(db, "SELECT js_eval('globalThis.keep = new ArrayBuffer(12 * 1024 * 1024); for (let i = 0; i < 300000; i++) { const o = {}; o.o = o; } keep.byteLength');", "12582912");
+    rc = db_exec(db, "SELECT js_set_memory_limit(64 * 1024 * 1024);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('globalThis.keep = new ArrayBuffer(48 * 1024 * 1024); for (let i = 0; i < 300000; i++) { const o = {}; o.o = o; } keep.byteLength');", "50331648");
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_query(db, "SELECT js_create_aggregate('n_rows', 'n = 0;', '(function(args){ n++; })', '(function(){ return n; })');", "0");
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_query(db, "WITH RECURSIVE g(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM g WHERE x < 300) SELECT sum(c) FROM (SELECT n_rows(x) AS c FROM g GROUP BY x);", "300");
     if (rc != SQLITE_OK) goto abort_test;
     rc = db_exec(db, "SELECT js_eval('delete globalThis.keep; 0');");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // a limit set under the memory already allocated, when that memory is garbage, still leaves
+    // the connection usable: QuickJS refuses every allocation while the memory in use is over
+    // the limit, and it collects only when it creates an object, which it cannot do without
+    // allocating, so the collector has to run as the limit changes
+    if (db) sqlite3_close(db);
+    db = NULL;
+    rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_set_memory_limit(0);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('globalThis.g = []; for (let i = 0; i < 200000; i++) { const o = {}; o.o = o; g.push(o); } g.length');", "200000");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_eval('delete globalThis.g; 0');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_set_memory_limit(4 * 1024 * 1024);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('[1, 2, 3].map(x => x * 2).join()');", "2,4,6");
     if (rc != SQLITE_OK) goto abort_test;
 
     // running out of memory through many small allocations, which leaves no room for the error
