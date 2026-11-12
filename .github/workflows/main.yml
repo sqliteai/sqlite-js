@@ -293,6 +293,7 @@ jobs:
           npm install
           npm run build
           npm test
+          npm run test:dist
           echo "✓ Main package built and tested"
 
           # Publish platform packages

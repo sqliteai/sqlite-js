@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
+import * as nodeModule from 'node:module';
 import {
   getCurrentPlatform,
   getPlatformPackageName,
@@ -11,35 +12,125 @@ import {
  * Error thrown when the SQLite JS extension cannot be found
  */
 export class ExtensionNotFoundError extends Error {
-  constructor(message: string) {
+  /** The underlying error that prevented the extension from loading, if any */
+  readonly cause?: unknown;
+
+  constructor(message: string, options?: { cause?: unknown }) {
     super(message);
     this.name = 'ExtensionNotFoundError';
+    if (options && 'cause' in options) {
+      // Non-enumerable, like the native `Error` `cause`
+      Object.defineProperty(this, 'cause', {
+        value: options.cause,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
+    }
   }
+}
+
+type PlatformPackageResult =
+  | { status: 'found'; path: string }
+  | { status: 'not-installed' }
+  | { status: 'invalid'; reason: string }
+  | { status: 'error'; error: unknown };
+
+/**
+ * Returns true when `error` means that `packageName` itself could not be
+ * resolved, as opposed to the package being present but failing to load.
+ */
+function isPackageNotFound(error: unknown, packageName: string): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  const message = (error as { message?: unknown } | null)?.message;
+  return (
+    code === 'MODULE_NOT_FOUND' &&
+    typeof message === 'string' &&
+    message.includes(`'${packageName}'`)
+  );
+}
+
+/**
+ * True when `require` cannot be used in the current module format: in the ESM
+ * build the bundler turns `require` into a shim that throws this error when no
+ * real `require` exists at runtime.
+ */
+function isRequireUnavailable(error: unknown): boolean {
+  if (error instanceof ReferenceError) {
+    return true; // `require is not defined`
+  }
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && /^Dynamic require of ".*" is not supported$/.test(message);
+}
+
+/**
+ * Loads `packageName`, trying each way of resolving it that the current
+ * module format and bundler allow:
+ *
+ * 1. `require`: available in the CommonJS build and in CommonJS bundles that
+ *    compile the ESM build (esbuild, webpack), where it resolves relative to
+ *    the running bundle.
+ * 2. `createRequire(import.meta.url)`: native ES modules, where there is no
+ *    `require`, and webpack bundles, which cannot follow a dynamic
+ *    `require(name)`. Skipped when a bundler left `import.meta.url` empty.
+ *    `createRequire` is reached through a namespace import so that webpack
+ *    does not rewrite the call statically.
+ *
+ * Moves on to the next way only when `require` is unavailable or the package
+ * was not found; any other error is thrown as is.
+ */
+function requirePlatformPackage(packageName: string): unknown {
+  let notFound: unknown;
+
+  try {
+    return require(packageName);
+  } catch (error) {
+    if (isPackageNotFound(error, packageName)) {
+      notFound = error;
+    } else if (!isRequireUnavailable(error)) {
+      throw error;
+    }
+  }
+
+  const moduleUrl: unknown = import.meta.url;
+  if (typeof moduleUrl === 'string' && moduleUrl !== '') {
+    return nodeModule.createRequire(moduleUrl)(packageName);
+  }
+
+  throw notFound ?? new Error(`Cannot load "${packageName}": no require function is available`);
 }
 
 /**
  * Attempts to load the platform-specific package
- * @returns The path to the extension binary, or null if not found
  */
-function tryLoadPlatformPackage(): string | null {
+function tryLoadPlatformPackage(packageName: string): PlatformPackageResult {
+  let platformPackage: { path?: unknown } | undefined;
+
   try {
-    const packageName = getPlatformPackageName();
-
-    // Try to dynamically import the platform package
-    // This works in both CommonJS and ESM
-    const platformPackage = require(packageName);
-
-    if (platformPackage?.path && typeof platformPackage.path === 'string') {
-      if (existsSync(platformPackage.path)) {
-        return platformPackage.path;
-      }
-    }
+    platformPackage = requirePlatformPackage(packageName) as typeof platformPackage;
   } catch (error) {
-    // Platform package not installed or failed to load
-    // This is expected when optionalDependencies fail
+    if (isPackageNotFound(error, packageName)) {
+      // Expected when the optional dependency was not installed
+      return { status: 'not-installed' };
+    }
+    return { status: 'error', error };
   }
 
-  return null;
+  if (typeof platformPackage?.path !== 'string') {
+    return {
+      status: 'invalid',
+      reason: `"${packageName}" does not export a binary path`,
+    };
+  }
+
+  if (!existsSync(platformPackage.path)) {
+    return {
+      status: 'invalid',
+      reason: `the binary "${platformPackage.path}" exported by "${packageName}" does not exist`,
+    };
+  }
+
+  return { status: 'found', path: platformPackage.path };
 }
 
 /**
@@ -57,25 +148,45 @@ function tryLoadPlatformPackage(): string | null {
  * ```
  */
 export function getExtensionPath(): string {
-  // Try to load from platform-specific package
-  const platformPath = tryLoadPlatformPackage();
-  if (platformPath) {
-    return resolve(platformPath);
-  }
-
-  // If we reach here, the platform package wasn't installed
   const currentPlatform = getCurrentPlatform();
   const packageName = getPlatformPackageName();
 
-  throw new ExtensionNotFoundError(
-    `SQLite JS extension not found for platform: ${currentPlatform}\n\n` +
-    `The platform-specific package "${packageName}" is not installed.\n` +
-    `This usually happens when:\n` +
-    `  1. Your platform is not supported\n` +
-    `  2. npm failed to install optional dependencies\n` +
-    `  3. You're installing with --no-optional flag\n\n` +
-    `Try running: npm install --force`
-  );
+  // Try to load from platform-specific package
+  const result = tryLoadPlatformPackage(packageName);
+
+  switch (result.status) {
+    case 'found':
+      return resolve(result.path);
+
+    case 'error': {
+      const detail =
+        result.error instanceof Error ? result.error.message : String(result.error);
+      throw new ExtensionNotFoundError(
+        `SQLite JS extension not found for platform: ${currentPlatform}\n\n` +
+        `The platform-specific package "${packageName}" could not be loaded:\n` +
+        `  ${detail}`,
+        { cause: result.error }
+      );
+    }
+
+    case 'invalid':
+      throw new ExtensionNotFoundError(
+        `SQLite JS extension not found for platform: ${currentPlatform}\n\n` +
+        `The platform-specific package "${packageName}" is installed, but ${result.reason}.\n\n` +
+        `Try reinstalling it: npm install --force`
+      );
+
+    case 'not-installed':
+      throw new ExtensionNotFoundError(
+        `SQLite JS extension not found for platform: ${currentPlatform}\n\n` +
+        `The platform-specific package "${packageName}" is not installed.\n` +
+        `This usually happens when:\n` +
+        `  1. Your platform is not supported\n` +
+        `  2. npm failed to install optional dependencies\n` +
+        `  3. You're installing with --no-optional flag\n\n` +
+        `Try running: npm install --force`
+      );
+  }
 }
 
 /**

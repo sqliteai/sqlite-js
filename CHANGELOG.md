@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.1] - 2026-11-12
+
+### Fixed
+
+- **Node.js: the package could not load the extension when imported as an ES module.** `import { getExtensionPath } from '@sqliteai/sqlite-js'`, as in the README, threw `ExtensionNotFoundError` saying the platform package (for example `@sqliteai/sqlite-js-linux-x86_64`) was not installed, even when it was. The ESM build could not use `require` to load the platform package, and the real error was discarded. The package now loads correctly from native ES modules, from CommonJS, and from esbuild and webpack bundles in both CommonJS and ESM output, including webpack bundles of the CommonJS build, which also failed before.
+- **Node.js: errors that prevented the platform package from loading were hidden.** `ExtensionNotFoundError` now says "not installed" only when the platform package is actually missing. Any other error raised while loading it is included in the message and available as the error's `cause`, and a platform package whose binary is missing gets its own message.
+
 ## [1.4.0] - 2026-11-12
 
 Four changes in this release can alter the behavior of SQL that works on 1.3.7. JavaScript now has a

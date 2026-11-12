@@ -26,6 +26,7 @@
     "build": "tsup",
     "prepublishOnly": "npm run build",
     "test": "vitest",
+    "test:dist": "node scripts/smoke-test-dist.mjs",
     "typecheck": "tsc --noEmit",
     "generate-platforms": "node generate-platform-packages.js"
   },
@@ -62,6 +63,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "esbuild": "^0.27.7",
     "tsup": "^8.0.0",
     "typescript": "^5.3.0",
     "vitest": "^3.2.4"
