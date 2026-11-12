@@ -912,6 +912,62 @@ abort_test:
     return rc;
 }
 
+// MARK: - Stack size -
+
+int test_stack_size (void) {
+    sqlite3 *db = NULL;
+    char sql[256];
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // code that calls itself without end fails, and the connection stays usable
+    const char *recurse = "SELECT js_eval('(function f(n) { return f(n + 1); })(0)');";
+    rc = check_error(db, recurse, "Maximum call stack size exceeded");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('1 + 1');", "2");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // a size is an integer no larger than the thread's stack, or 0 for no check: text would read
+    // as 0, and a size larger than the stack never trips the check, so the code above would
+    // crash the process
+    const char *invalid[] = {"'abc'", "-1", "1.5", "'1048576'", "NULL", "x'00'", "1073741824"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        snprintf(sql, sizeof(sql), "SELECT js_set_max_stack_size(%s);", invalid[i]);
+        rc = check_error(db, sql, "The stack size must be an integer number of bytes from 1 to ");
+        if (rc != SQLITE_OK) goto abort_test;
+    }
+
+    // close to the largest size allowed, the code still stops, also when it calls itself
+    // through SQL, which puts SQLite's frames between QuickJS's stack checks
+    const char *most_text = strstr(sqlite3_errmsg(db), "from 1 to ");
+    long long most = most_text ? strtoll(most_text + strlen("from 1 to "), NULL, 10) : 0;
+    if (most <= 64 * 1024) { printf("FAIL: no stack size range in: %s\n", sqlite3_errmsg(db)); rc = SQLITE_ERROR; goto abort_test; }
+    snprintf(sql, sizeof(sql), "SELECT js_set_max_stack_size(%lld);", most - 4096);
+    rc = db_exec(db, sql);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, recurse, "Maximum call stack size exceeded");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_create_scalar('recurse_sql', '(function (args) { try { const rs = db.exec(\"SELECT recurse_sql(?)\", args[0] + 1); if (rs.next()) return rs.get(0); } catch (e) {} throw new Error(\"stopped\"); })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT recurse_sql(0);", "stopped");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // a smaller size
+    rc = db_exec(db, "SELECT js_set_max_stack_size(256 * 1024);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, recurse, "Maximum call stack size exceeded");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // 0 is still allowed, for connections used from several threads (see test_thread)
+    rc = check_query(db, "SELECT quote(js_set_max_stack_size(0));", "NULL");
+    if (rc != SQLITE_OK) goto abort_test;
+
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: -
 
 int test_report(const char *description, int rc){
@@ -935,6 +991,7 @@ int main (void) {
     result += test_report("Blobs", test_blobs());
     result += test_report("Numbers", test_numbers());
     result += test_report("Memory limit", test_memory_limit());
+    result += test_report("Stack size", test_stack_size());
 
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;
