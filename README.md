@@ -437,13 +437,13 @@ SELECT js_load_blob('/path/to/file.bin');   -- Returns file contents as a blob
 
 ### js_set_max_stack_size
 
-Sets the most stack, in bytes, that JavaScript may use, which limits how deeply functions can call themselves; code that goes deeper fails with "Maximum call stack size exceeded". The default is 1 MB, or less when the thread that loads the extension has less stack. The size must be an integer no larger than the calling thread's stack allows, less a margin for the native code that runs between QuickJS's checks (`SQLITE_JS_STACK_MARGIN`, 256 KB); the error message gives the largest size allowed. A larger size, or text, which would read as 0, is an error, because QuickJS's check would never trip and code that calls itself without end would crash the process.
+Sets the most stack, in bytes, that JavaScript may use, which limits how deeply functions can call themselves; code that goes deeper fails with "Maximum call stack size exceeded". The default is 1 MB. Each call into JavaScript measures the stack of the thread it runs on, so a connection can be used from several threads, and the size is lowered for a call on a thread with less stack. The size must be an integer no larger than the calling thread's stack allows, less a margin for the native code that runs between QuickJS's checks (`SQLITE_JS_STACK_MARGIN`, 256 KB); the error message gives the largest size allowed. A larger size, or text, which would read as 0, is an error, because QuickJS's check would never trip and code that calls itself without end would crash the process.
 
-`0` turns the check off, for a connection used from several threads: the check measures from the stack of the thread that loaded the extension. With the check off, code that calls itself without end crashes the process.
+`0` turns the check off. Code that calls itself without end then crashes the process.
 
 ```sql
 SELECT js_set_max_stack_size(1048576);  -- Set max stack size to 1 MB
-SELECT js_set_max_stack_size(0);        -- No check, for use from several threads
+SELECT js_set_max_stack_size(0);        -- No check
 ```
 
 ### js_set_memory_limit

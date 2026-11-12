@@ -39,6 +39,12 @@
 SQLITE_EXTENSION_INIT1
 #endif
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#define JS_THREAD_LOCAL __declspec(thread)
+#else
+#define JS_THREAD_LOCAL _Thread_local
+#endif
+
 #ifdef _WIN32
 #define APIEXPORT       __declspec(dllexport)
 #else
@@ -57,6 +63,8 @@ typedef struct {
     size_t              gc_threshold;   // QuickJS's GC threshold when last checked: see js_keep_gc_below_limit()
     size_t              mem_used;       // memory the runtime has allocated: see js_mem_malloc()
     size_t              mem_peak;       // the most in use since the last result or error
+    size_t              stack_size;     // in bytes, 0 for no check: see js_set_max_stack_size()
+    int                 depth;          // calls into JavaScript in progress: see js_enter()
 } globaljs_context;
 
 typedef struct {
@@ -341,6 +349,41 @@ static void js_mem_reset_peak (globaljs_context *js) {
 #define SQLITE_JS_STACK_MARGIN  (256 * 1024)
 #endif
 
+// The lowest address of the calling thread's stack, found once per thread: on Linux, finding the
+// main thread's stack reads /proc/self/maps. Returns false where the stack cannot be found.
+static bool js_stack_low (uintptr_t sp, uintptr_t *low) {
+    static JS_THREAD_LOCAL uintptr_t thread_low;
+    static JS_THREAD_LOCAL bool thread_unknown;
+    if (thread_low != 0) { *low = thread_low; return true; }
+    if (thread_unknown) return false;
+#if defined(_WIN32)
+    // the stack is one allocation, reserved from its lowest address
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((LPCVOID)sp, &mbi, sizeof(mbi)) == 0) { thread_unknown = true; return false; }
+    thread_low = (uintptr_t)mbi.AllocationBase;
+#elif defined(__APPLE__)
+    UNUSED(sp);
+    pthread_t self = pthread_self();
+    thread_low = (uintptr_t)pthread_get_stackaddr_np(self) - pthread_get_stacksize_np(self);
+#elif defined(__linux__)
+    UNUSED(sp);
+    pthread_attr_t attr;
+    void *addr = NULL;
+    size_t size = 0;
+    if (pthread_getattr_np(pthread_self(), &attr) != 0) { thread_unknown = true; return false; }
+    int rc = pthread_attr_getstack(&attr, &addr, &size);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) { thread_unknown = true; return false; }
+    thread_low = (uintptr_t)addr;
+#else
+    UNUSED(sp);
+    thread_unknown = true;
+    return false;
+#endif
+    *low = thread_low;
+    return true;
+}
+
 // The stack, in bytes, that the calling thread has left below this function, less the margin.
 // QuickJS trusts its stack size: one larger than the thread has never trips its check, and code
 // that calls itself without end then crashes the process. Returns false where the thread's stack
@@ -357,28 +400,28 @@ static bool js_stack_room (size_t *room) {
     uintptr_t sp = (uintptr_t)&here;
 #endif
     uintptr_t low = 0;
-#if defined(_WIN32)
-    // the stack is one allocation, reserved from its lowest address
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery((LPCVOID)sp, &mbi, sizeof(mbi)) == 0) return false;
-    low = (uintptr_t)mbi.AllocationBase;
-#elif defined(__APPLE__)
-    pthread_t self = pthread_self();
-    low = (uintptr_t)pthread_get_stackaddr_np(self) - pthread_get_stacksize_np(self);
-#elif defined(__linux__)
-    pthread_attr_t attr;
-    void *addr = NULL;
-    size_t size = 0;
-    if (pthread_getattr_np(pthread_self(), &attr) != 0) return false;
-    int rc = pthread_attr_getstack(&attr, &addr, &size);
-    pthread_attr_destroy(&attr);
-    if (rc != 0) return false;
-    low = (uintptr_t)addr;
-#else
-    return false;
-#endif
+    if (!js_stack_low(sp, &low)) return false;
     *room = (sp > low + SQLITE_JS_STACK_MARGIN) ? (size_t)(sp - low - SQLITE_JS_STACK_MARGIN) : 0;
     return true;
+}
+
+// Points QuickJS's stack check at the calling thread before JavaScript runs on a connection.
+// QuickJS measures the stack from the top it recorded on the thread that created the runtime,
+// so on any other thread its check is wrong: code fails at once with "Maximum call stack size
+// exceeded", or code that calls itself without end is never stopped and crashes the process.
+// An app's connection pool runs a connection on many threads. The size is also kept within
+// what this thread's stack has left. A call nested in another (JavaScript running SQL that
+// runs JavaScript) is on the same thread and keeps the outer call's limit.
+static void js_enter (globaljs_context *js) {
+    if (js->depth++ > 0) return;
+    JS_UpdateStackTop(js->runtime);
+    size_t size = js->stack_size, room = 0;
+    if ((size > 0) && js_stack_room(&room) && (room < size)) size = (room > 0) ? room : 1;
+    JS_SetMaxStackSize(js->runtime, size);
+}
+
+static void js_leave (globaljs_context *js) {
+    js->depth--;
 }
 
 static globaljs_context *globaljs_init (sqlite3 *db) {
@@ -416,6 +459,7 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     js->runtime = rt;
     js->context = ctx;
     js->ref_count = 0;
+    js->stack_size = JS_DEFAULT_STACK_SIZE;
     
     JS_SetContextOpaque(ctx, js);
     JS_SetRuntimeOpaque(rt, js);
@@ -1127,7 +1171,9 @@ static void js_execute_common (sqlite3_context *context, JSContext *js_context, 
 
 static void js_execute_scalar (sqlite3_context *context, int nvalues, sqlite3_value **values) {
     functionjs_context *fctx = (functionjs_context *)sqlite3_user_data(context);
+    js_enter(fctx->js_ctx);
     js_execute_common(context, fctx->js_ctx->context, nvalues, values, fctx->func, JS_UNDEFINED, true);
+    js_leave(fctx->js_ctx);
 }
 
 static void js_execute_step (sqlite3_context *context, int nvalues, sqlite3_value **values) {
@@ -1142,12 +1188,11 @@ static void js_execute_step (sqlite3_context *context, int nvalues, sqlite3_valu
     
     // if there is an init code then create a separate aggregate context
     // to avoid shared state corruption across parallel aggregates
-    if (!agg_ctx->context) {
-        // set up a new isolated environment for this aggregation
-        if (js_setup_aggregate(context, js, agg_ctx, fctx->init_code, fctx->step_code, fctx->final_code, fctx->value_code, fctx->inverse_code) == false) return;
+    js_enter(js);
+    if (agg_ctx->context || js_setup_aggregate(context, js, agg_ctx, fctx->init_code, fctx->step_code, fctx->final_code, fctx->value_code, fctx->inverse_code)) {
+        js_execute_common(context, agg_ctx->context, nvalues, values, agg_ctx->step_func, JS_UNDEFINED, false);
     }
-
-    js_execute_common(context, agg_ctx->context, nvalues, values, agg_ctx->step_func, JS_UNDEFINED, false);
+    js_leave(js);
 }
 
 static void js_execute_value (sqlite3_context *context) {
@@ -1155,21 +1200,30 @@ static void js_execute_value (sqlite3_context *context) {
     // new allocation here could only fail and there would be nothing to report anyway
     functionjs_aggregate_context *agg_ctx = sqlite3_aggregate_context(context, 0);
     if (!agg_ctx || !agg_ctx->context) { sqlite3_result_null(context); return; }
+    globaljs_context *js = ((functionjs_context *)sqlite3_user_data(context))->js_ctx;
+    js_enter(js);
     js_execute_common(context, agg_ctx->context, 0, NULL, agg_ctx->value_func, JS_UNDEFINED, true);
+    js_leave(js);
 }
 
 static void js_execute_inverse (sqlite3_context *context, int nvalues, sqlite3_value **values) {
     functionjs_aggregate_context *agg_ctx = sqlite3_aggregate_context(context, 0);
     if (!agg_ctx || !agg_ctx->context) return;
+    globaljs_context *js = ((functionjs_context *)sqlite3_user_data(context))->js_ctx;
+    js_enter(js);
     js_execute_common(context, agg_ctx->context, nvalues, values, agg_ctx->inverse_func, JS_UNDEFINED, false);
+    js_leave(js);
 }
 
 static void js_execute_final (sqlite3_context *context) {
     functionjs_aggregate_context *agg_ctx = sqlite3_aggregate_context(context, 0);
 
     if (agg_ctx && agg_ctx->context) {
+        globaljs_context *js = ((functionjs_context *)sqlite3_user_data(context))->js_ctx;
+        js_enter(js);
         js_execute_common(context, agg_ctx->context, 0, NULL, agg_ctx->final_func, JS_UNDEFINED, true);
         functionjs_aggregate_free(agg_ctx);
+        js_leave(js);
     } else {
         sqlite3_result_null(context);
     }
@@ -1178,6 +1232,7 @@ static void js_execute_final (sqlite3_context *context) {
 static int js_execute_collation (void *xdata, int len1, const void *v1, int len2, const void *v2) {
     functionjs_context *fctx = (functionjs_context *)xdata;
     globaljs_context *js = fctx->js_ctx;
+    js_enter(js);
 
     // create arguments
     JSValue val1 = (v1) ? JS_NewStringLen(js->context, (const char *)v1, (size_t)len1) : JS_NULL;
@@ -1202,6 +1257,7 @@ static int js_execute_collation (void *xdata, int len1, const void *v1, int len2
         if (JS_ToFloat64(js->context, &num, result) == 0) nresult = (num < 0.0) ? -1 : ((num > 0.0) ? 1 : 0);
     }
     JS_FreeValue(js->context, result);
+    js_leave(js);
     
     return nresult;
 }
@@ -1305,7 +1361,7 @@ insert_function:
     return (rc == SQLITE_DONE);
 }
 
-bool js_create_common (sqlite3_context *context, const char *type, const char *name, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code, bool is_load) {
+static bool js_create_function (sqlite3_context *context, const char *type, const char *name, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code, bool is_load) {
     
     globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
     
@@ -1400,6 +1456,14 @@ bool js_create_common (sqlite3_context *context, const char *type, const char *n
     return (rc == SQLITE_OK);
 }
 
+bool js_create_common (sqlite3_context *context, const char *type, const char *name, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code, bool is_load) {
+    globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
+    js_enter(js);
+    bool ok = js_create_function(context, type, name, init_code, step_code, final_code, value_code, inverse_code, is_load);
+    js_leave(js);
+    return ok;
+}
+
 void js_create_scalar (sqlite3_context *context, int argc, sqlite3_value **argv) {
     UNUSED(argc);
     // get/check parameters first
@@ -1472,9 +1536,11 @@ void js_eval (sqlite3_context *context, int argc, sqlite3_value **argv) {
         return;
     }
     
+    js_enter(data);
     JSValue value = JS_Eval(data->context, code, strlen(code), NULL, JS_EVAL_TYPE_GLOBAL);
     js_value_to_sqlite(context, data->context, value);
     JS_FreeValue(data->context, value);
+    js_leave(data);
 }
 
 static void js_load_fromfile (sqlite3_context *context, int argc, sqlite3_value **argv, bool is_blob) {
@@ -1632,10 +1698,11 @@ void js_set_max_stack_size (sqlite3_context *context, int argc, sqlite3_value **
     UNUSED(argc);
     globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
 
-    // 0 turns QuickJS's check off, for a connection used from several threads (the check measures
-    // from the stack of the thread that loaded the extension). Text would read as 0, and a size
-    // larger than the thread's stack is no limit either: code that calls itself without end
-    // would crash the process. Where the stack cannot be measured, allow up to the default.
+    // 0 turns QuickJS's check off. It was needed for a connection used from several threads,
+    // before each call into JavaScript measured its own thread's stack (see js_enter). Text would
+    // read as 0, and a size larger than the thread's stack is no limit either: code that calls
+    // itself without end would crash the process. Where the stack cannot be measured, allow up
+    // to the default.
     size_t most = JS_DEFAULT_STACK_SIZE;
     js_stack_room(&most);
     sqlite3_int64 size = sqlite3_value_int64(argv[0]);
@@ -1647,6 +1714,7 @@ void js_set_max_stack_size (sqlite3_context *context, int argc, sqlite3_value **
         return;
     }
 
+    js->stack_size = (size_t)size;
     JS_SetMaxStackSize(js->runtime, (size_t)size);
 }
 
