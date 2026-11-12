@@ -355,9 +355,10 @@ static void js_mem_reset_peak (globaljs_context *js) {
 #endif
 
 // The least stack worth giving JavaScript. QuickJS cannot even create a context below about
-// 16 KB (measured: 4 KB fails, 16 KB works), and it reads 0 as "no check at all", so a smaller
-// measurement is treated as no measurement and leaves the default alone. Failing to catch
-// runaway recursion is the lesser evil next to an extension that cannot load.
+// 16 KB (measured: 4 KB fails, 16 KB works), and it reads 0 as "no check at all", so where a
+// runtime is created a smaller measurement is treated as no measurement and leaves the default
+// alone. Failing to catch runaway recursion is the lesser evil next to an extension that cannot
+// load. A call into JavaScript on an existing runtime keeps any measurement (see js_enter).
 #ifndef SQLITE_JS_STACK_MIN
 #define SQLITE_JS_STACK_MIN     (32 * 1024)
 #endif
@@ -395,7 +396,10 @@ static bool js_stack_low (uintptr_t sp, uintptr_t *low) {
     if (syscall(SYS_gettid) == (long)getpid()) {
         struct rlimit limit;
         if ((getrlimit(RLIMIT_STACK, &limit) == 0) && (limit.rlim_cur != RLIM_INFINITY)) {
-            uintptr_t grows_to = (sp > (uintptr_t)limit.rlim_cur) ? sp - (uintptr_t)limit.rlim_cur : 0;
+            // counted from the top of the stack, as the kernel counts it: counted from sp, a first
+            // measurement deep in the stack would put the bound below the real one
+            uintptr_t high = (uintptr_t)addr + size;
+            uintptr_t grows_to = (high > (uintptr_t)limit.rlim_cur) ? high - (uintptr_t)limit.rlim_cur : 0;
             if (grows_to < thread_low) thread_low = grows_to;
         }
     }
@@ -443,8 +447,11 @@ static bool js_stack_room (size_t *room) {
 static void js_enter (globaljs_context *js) {
     if (js->depth++ > 0) return;
     JS_UpdateStackTop(js->runtime);
+    // A thread with less room than SQLITE_JS_STACK_MIN keeps it too: JavaScript there then fails
+    // with "Maximum call stack size exceeded" rather than running past the end of the stack. A
+    // size of 1 rather than 0, which would turn the check off.
     size_t size = js->stack_size, room = 0;
-    if ((size > 0) && js_stack_room(&room) && (room >= SQLITE_JS_STACK_MIN) && (room < size)) size = room;
+    if ((size > 0) && js_stack_room(&room) && (room < size)) size = (room > 0) ? room : 1;
     JS_SetMaxStackSize(js->runtime, size);
 }
 

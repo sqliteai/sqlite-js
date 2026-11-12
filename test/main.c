@@ -1022,6 +1022,13 @@ static void *stack_thread_run (void *ptr) {
     return NULL;
 }
 
+// Runs forever() on the calling thread, which must stop with an error instead of crashing.
+static void *stack_thread_forever (void *ptr) {
+    stack_thread_args *args = (stack_thread_args *)ptr;
+    args->rc = check_error(args->db, "SELECT forever();", "Maximum call stack size exceeded");
+    return NULL;
+}
+
 static void *stack_thread_open (void *ptr) {
     stack_thread_args *args = (stack_thread_args *)ptr;
     args->rc = test_open(&args->db);
@@ -1093,6 +1100,11 @@ int test_stack_threads (void) {
     if (rc != SQLITE_OK) goto abort_test;
     stack_thread_run(&args);
     rc = args.rc;
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // and on a thread with less stack left than SQLITE_JS_STACK_MIN: the size is still lowered to
+    // fit, since the default would let code that calls itself without end run past the stack
+    rc = stack_thread(stack_thread_forever, &args, 64 * 1024);
     if (rc != SQLITE_OK) goto abort_test;
 
     // a thread whose whole stack is under twice the margin still gets a usable runtime
