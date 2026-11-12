@@ -649,6 +649,38 @@ abort_test:
     return rc;
 }
 
+// MARK: - Exec errors -
+
+int test_exec_errors (void) {
+    sqlite3 *db = NULL;
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    rc = db_exec(db, "CREATE TABLE u(a UNIQUE); INSERT INTO u VALUES (1);");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // an error while the statement runs is an exception, from next() and from toArray()
+    rc = check_error(db, "SELECT js_eval('db.exec(\"INSERT INTO u VALUES (1)\").next()');", "UNIQUE constraint failed");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('db.exec(\"SELECT abs(-9223372036854775808)\").next()');", "integer overflow");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('db.exec(\"SELECT 1 UNION ALL SELECT abs(-9223372036854775808) UNION ALL SELECT 3\").toArray()');", "integer overflow");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // JavaScript can catch it
+    rc = check_query(db, "SELECT js_eval('(function () { try { db.exec(\"INSERT INTO u VALUES (1)\").next(); return \"no error\"; } catch (e) { return e.message; } })()');", "UNIQUE constraint failed: u.a");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // the end of the rows is still false, and a statement that succeeds still runs
+    rc = check_query(db, "SELECT js_eval('[db.exec(\"SELECT 1 WHERE 0\").next(), db.exec(\"INSERT INTO u VALUES (2)\").next(), JSON.stringify(db.exec(\"SELECT a FROM u ORDER BY a\").toArray())].join(\" \")');", "false false [[1],[2]]");
+    if (rc != SQLITE_OK) goto abort_test;
+
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: -
 
 int test_report(const char *description, int rc){
@@ -668,6 +700,7 @@ int main (void) {
     result += test_report("Interrupt", test_interrupt());
     result += test_report("Direct only", test_direct_only());
     result += test_report("Aggregate errors", test_aggregate_errors());
+    result += test_report("Exec errors", test_exec_errors());
 
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;

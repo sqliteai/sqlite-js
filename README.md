@@ -382,9 +382,23 @@ SELECT js_eval('Math.PI * Math.pow(5, 2)');
 SELECT js_eval('new Date(1629381600000).toLocaleDateString()');
 ```
 
+<<<<<<< HEAD
 ### Interrupting JavaScript
 
 JavaScript runs inside the SQL statement that calls it, so `sqlite3_interrupt()` stops it as it stops any statement: the statement fails with an "interrupted" error, even if the code catches exceptions. In the `sqlite3` shell, Ctrl-C does this. Interrupting JavaScript needs SQLite 3.41.0 or later.
+=======
+### Running SQL from JavaScript
+
+JavaScript can run SQL on the same connection through the global `db` object. `db.exec(sql, ...parameters)` prepares one statement, binds the parameters to its `?` placeholders, and returns a result set. The statement runs as you step through it: `next()` moves to the next row and returns `true`, or `false` after the last; `get(i)` and `name(i)` give a column's value and name; `columnCount` is the number of columns; and `toArray()` returns the remaining rows as arrays. A statement that returns no rows, such as an `INSERT`, also runs only when you call `next()` or `toArray()`.
+
+An error while the statement runs, such as a failed constraint, is thrown from `next()` or `toArray()`, as an error in the SQL itself is thrown from `db.exec()`.
+
+```sql
+CREATE TABLE t(a UNIQUE);
+SELECT js_eval('db.exec("INSERT INTO t VALUES (?)", 1).next()');  -- 0: the row is inserted, and next() is false, as there are no rows
+SELECT js_eval('(function () { try { db.exec("INSERT INTO t VALUES (?)", 1).next(); } catch (e) { return e.message; } })()');  -- UNIQUE constraint failed: t.a
+```
+>>>>>>> pr-18
 
 ## Utility Functions
 
