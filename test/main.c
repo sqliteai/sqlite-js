@@ -6,6 +6,7 @@
 //
 
 #include <stdio.h>
+#include <stdlib.h>   // strtoll, in the stack size test
 #include "sqlite3.h"
 #include "sqlitejs.h"
 #include <pthread.h>
