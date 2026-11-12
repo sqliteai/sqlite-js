@@ -925,7 +925,9 @@ static void js_error_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
             default_error = "out of memory";
         }
     }
-    bool out_of_memory = js_reached_memory_limit(JS_GetContextOpaque(js_ctx));
+    // An allocation too large to fit is refused before it is counted, so the memory in use need
+    // not have come near the limit: the error itself says so.
+    bool out_of_memory = js_reached_memory_limit(JS_GetContextOpaque(js_ctx)) || (err_msg && (strcmp(err_msg, "out of memory") == 0));
     js_mem_reset_peak(JS_GetContextOpaque(js_ctx));
 
     // set a default error message and code
@@ -937,9 +939,9 @@ static void js_error_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
     if (!JS_IsNull(exception)) JS_FreeValue(js_ctx, exception);
 
     // QuickJS refuses every allocation once the memory in use is over the limit, and it collects
-    // only when it creates an object, which it cannot do without allocating: the connection
-    // would stay out of memory for good. No JavaScript is running here, so collect now, while
-    // the garbage that filled the limit is still reachable from nothing.
+    // only when it creates an object past its threshold, which the code that failed may never
+    // do: the connection would stay out of memory for good. No JavaScript is running here, so
+    // collect now, while the garbage that filled the limit is still reachable from nothing.
     if (out_of_memory) js_collect_below_limit(JS_GetContextOpaque(js_ctx));
 }
 
@@ -1761,9 +1763,11 @@ void js_set_memory_limit (sqlite3_context *context, int argc, sqlite3_value **ar
     js->memory_limit = (limit > SIZE_MAX) ? 0 : (size_t)limit;
     JS_SetMemoryLimit(js->runtime, js->memory_limit);
     js->gc_threshold = 0;   // check the GC threshold against the new limit
-    // a limit at or under the memory in use leaves nothing to allocate from, and QuickJS cannot
-    // collect without allocating, so collect here instead
-    if ((js->memory_limit > 0) && (js->mem_used + 64 * 1024 >= js->memory_limit)) js_collect_below_limit(js);
+    // Garbage left from before counts against the new limit, and QuickJS collects only when it
+    // creates an object past its threshold: a limit at or under the memory in use leaves nothing
+    // to allocate from, and one above it can leave too little for a large allocation. So collect
+    // here, as no JavaScript is running.
+    if (js->memory_limit > 0) js_collect_below_limit(js);
     else js_keep_gc_below_limit(js);
     js_mem_reset_peak(js);
 }
