@@ -1028,17 +1028,21 @@ static int stack_thread (void *(*fn)(void *), stack_thread_args *args, size_t st
 // once with "Maximum call stack size exceeded", or code that called itself without end crashed.
 int test_stack_threads (void) {
     // each level of JavaScript recursion takes about 1.5 KB of native stack, and the small stack
-    // below leaves about 250 KB after SQLITE_JS_STACK_MARGIN
+    // below leaves about 500 KB after SQLITE_JS_STACK_MARGIN. It is under JS_DEFAULT_STACK_SIZE,
+    // so the size is still lowered to fit, with room to spare for a build whose frames are
+    // larger, such as one under AddressSanitizer.
     stack_thread_args args = {NULL, 100, SQLITE_OK};
 
-    // opened on this thread, used on another
+    // opened on this thread, used on another. The stack of that thread is asked for rather than
+    // left to the platform, whose default is 8 MB on Linux but 512 KB on macOS, which leaves
+    // 100 levels little room once SQLITE_JS_STACK_MARGIN is kept free.
     int rc = test_open(&args.db);
     if (rc == SQLITE_OK) rc = stack_thread_functions(args.db);
-    if (rc == SQLITE_OK) rc = stack_thread(stack_thread_run, &args, 0);
+    if (rc == SQLITE_OK) rc = stack_thread(stack_thread_run, &args, 1024 * 1024);
     if (rc != SQLITE_OK) goto abort_test;
 
     // and on another thread with a small stack, where the size is lowered to fit
-    rc = stack_thread(stack_thread_run, &args, 512 * 1024);
+    rc = stack_thread(stack_thread_run, &args, 768 * 1024);
     if (rc != SQLITE_OK) goto abort_test;
 
     // and back on this thread
