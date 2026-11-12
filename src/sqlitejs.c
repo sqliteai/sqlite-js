@@ -31,6 +31,8 @@ typedef struct {
     sqlite3             *db;
     JSClassID           rowSetClassID;
     int                 ref_count;
+    JSValue             typed_array_byte_offset;    // the getters of every typed array's own
+    JSValue             typed_array_byte_length;    // offset and length: see js_get_bytes()
 } globaljs_context;
 
 typedef struct {
@@ -214,6 +216,8 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     globaljs_context *js = (globaljs_context *)sqlite3_malloc(sizeof(globaljs_context));
     if (!js) return NULL;
     memset(js, 0, sizeof(globaljs_context));
+    js->typed_array_byte_offset = JS_UNDEFINED;
+    js->typed_array_byte_length = JS_UNDEFINED;
     
     rt = JS_NewRuntime();
     if (!rt) goto abort_init;
@@ -240,10 +244,22 @@ static globaljs_context *globaljs_init (sqlite3 *db) {
     JS_SetRuntimeOpaque(rt, js);
     js_global_init(ctx, js);
     
+    // taken before any other code runs: a script can shadow or redefine a typed array's
+    // byteOffset and byteLength, but these are its own
+    static const char offset_getter[] = "Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteOffset').get";
+    static const char length_getter[] = "Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength').get";
+    js->typed_array_byte_offset = JS_Eval(ctx, offset_getter, sizeof(offset_getter) - 1, "<init>", JS_EVAL_TYPE_GLOBAL);
+    js->typed_array_byte_length = JS_Eval(ctx, length_getter, sizeof(length_getter) - 1, "<init>", JS_EVAL_TYPE_GLOBAL);
+    if (!JS_IsFunction(ctx, js->typed_array_byte_offset) || !JS_IsFunction(ctx, js->typed_array_byte_length)) goto abort_init;
+    
     return js;
     
 abort_init:
-    if (ctx) JS_FreeContext(ctx);
+    if (ctx) {
+        JS_FreeValue(ctx, js->typed_array_byte_offset);
+        JS_FreeValue(ctx, js->typed_array_byte_length);
+        JS_FreeContext(ctx);
+    }
     if (rt) {
         js_std_free_handlers(rt);
         JS_FreeRuntime(rt);
@@ -257,7 +273,11 @@ static void globaljs_free (globaljs_context *js) {
 
     // order matters
     if (js->runtime) js_std_free_handlers(js->runtime);
-    if (js->context) JS_FreeContext(js->context);
+    if (js->context) {
+        JS_FreeValue(js->context, js->typed_array_byte_offset);
+        JS_FreeValue(js->context, js->typed_array_byte_length);
+        JS_FreeContext(js->context);
+    }
     if (js->runtime) JS_FreeRuntime(js->runtime);
     sqlite3_free(js);
 }
@@ -369,6 +389,58 @@ static void functionjs_free (functionjs_context *fctx) {
 
 // MARK: - Utils -
 
+// Gets the bytes of an ArrayBuffer, or of the part of an ArrayBuffer that a typed array such
+// as a Uint8Array views: the forms a BLOB takes in JavaScript (a BLOB arrives as an
+// ArrayBuffer). Returns 1 and sets *pbytes and *psize if value is one of them (*pbytes may be
+// NULL when *psize is 0), 0 if it is not, and -1 with a pending JavaScript exception if its
+// buffer is detached or the typed array is out of its bounds.
+static int js_get_bytes (JSContext *ctx, JSValueConst value, const uint8_t **pbytes, size_t *psize) {
+    *pbytes = NULL;
+    *psize = 0;
+    
+    if (JS_IsArrayBuffer(value)) {
+        uint8_t *buf = JS_GetArrayBuffer(ctx, psize, value);
+        if (!buf && JS_HasException(ctx)) return -1;
+        *pbytes = buf;
+        return 1;
+    }
+    
+    if (JS_GetTypedArrayType(value) >= 0) {
+        // The offset and length come from the byteOffset and byteLength getters: a typed array
+        // can track the length of a resizable buffer, and the length QuickJS records when the
+        // array is made goes stale when the buffer is resized. They are the getters taken when
+        // the runtime was made (see globaljs_init), not the properties, which a script can
+        // shadow, so they run no JavaScript.
+        globaljs_context *js = (globaljs_context *)JS_GetContextOpaque(ctx);
+        int64_t offset = 0, length = 0;
+        JSValue prop = JS_Call(ctx, js->typed_array_byte_offset, value, 0, NULL);
+        int rc = JS_IsException(prop) ? -1 : JS_ToInt64(ctx, &offset, prop);
+        JS_FreeValue(ctx, prop);
+        if (rc < 0) return -1;
+        prop = JS_Call(ctx, js->typed_array_byte_length, value, 0, NULL);
+        rc = JS_IsException(prop) ? -1 : JS_ToInt64(ctx, &length, prop);
+        JS_FreeValue(ctx, prop);
+        if (rc < 0) return -1;
+        
+        size_t size = 0;
+        JSValue buffer = JS_GetTypedArrayBuffer(ctx, value, NULL, NULL, NULL);
+        if (JS_IsException(buffer)) return -1;
+        uint8_t *buf = JS_GetArrayBuffer(ctx, &size, buffer);
+        // the typed array keeps its buffer alive, so buf stays valid
+        JS_FreeValue(ctx, buffer);
+        if (!buf && JS_HasException(ctx)) return -1;
+        if ((offset < 0) || (length < 0) || ((uint64_t)offset > size) || ((uint64_t)length > size - (size_t)offset)) {
+            JS_ThrowRangeError(ctx, "typed array is out of the bounds of its buffer");
+            return -1;
+        }
+        *pbytes = (buf) ? buf + offset : NULL;
+        *psize = (size_t)length;
+        return 1;
+    }
+    
+    return 0;
+}
+
 static int js_bind_value (JSContext *ctx, sqlite3_stmt *vm, int index, JSValueConst val) {
     if (JS_IsNull(val) || JS_IsUndefined(val)) {
         return sqlite3_bind_null(vm, index);
@@ -403,13 +475,15 @@ static int js_bind_value (JSContext *ctx, sqlite3_stmt *vm, int index, JSValueCo
         JS_FreeCString(ctx, str);
         return rc;
     }
-    if (JS_IsArrayBuffer(val)) {
-        size_t size = 0;
-        uint8_t *buf = JS_GetArrayBuffer(ctx, &size, val);
-        if (buf) {
-            return sqlite3_bind_blob(vm, index, buf, (int)size, SQLITE_TRANSIENT);
-        }
-        return sqlite3_bind_null(vm, index);
+    const uint8_t *bytes = NULL;
+    size_t size = 0;
+    int is_blob = js_get_bytes(ctx, val, &bytes, &size);
+    // a buffer whose bytes cannot be read (detached, or a view out of its bounds) is an error, as
+    // returning it from a function is: the JavaScript exception stays pending for js_sqlite_exec
+    if (is_blob < 0) return SQLITE_ERROR;
+    if (is_blob) {
+        if (size == 0) return sqlite3_bind_zeroblob(vm, index, 0);
+        return sqlite3_bind_blob64(vm, index, bytes, (sqlite3_uint64)size, SQLITE_TRANSIENT);
     }
     return sqlite3_bind_null(vm, index);
 }
@@ -429,6 +503,11 @@ static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql, int
         for (int i = 0; i < nbind; ++i) {
             // argv[0] is the first binding argument (SQL string already consumed by caller)
             rc = js_bind_value(ctx, vm, i + 1, argv[i + 1]);
+            if ((rc != SQLITE_OK) && JS_HasException(ctx)) {
+                // a JavaScript error, such as a buffer that cannot be read: throw it as it is
+                sqlite3_finalize(vm);
+                return JS_EXCEPTION;
+            }
             if (rc != SQLITE_OK) goto abort_with_dberror;
         }
     }
@@ -636,6 +715,20 @@ static void js_value_to_sqlite (sqlite3_context *context, JSContext *js_ctx, JSV
         } else {
             sqlite3_result_error(context, "Failed to convert JS string", -1);
         }
+        return;
+    }
+    
+    // handle ArrayBuffer and typed arrays, the forms a BLOB takes in JavaScript
+    const uint8_t *bytes = NULL;
+    size_t size = 0;
+    int is_blob = js_get_bytes(js_ctx, value, &bytes, &size);
+    if (is_blob < 0) {
+        js_error_to_sqlite(context, js_ctx, JS_EXCEPTION, NULL);
+        return;
+    }
+    if (is_blob) {
+        if (size == 0) sqlite3_result_zeroblob(context, 0);
+        else sqlite3_result_blob64(context, bytes, (sqlite3_uint64)size, SQLITE_TRANSIENT);
         return;
     }
     

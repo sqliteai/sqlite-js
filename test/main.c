@@ -681,6 +681,65 @@ abort_test:
     return rc;
 }
 
+// MARK: - Blobs -
+
+int test_blobs (void) {
+    sqlite3 *db = NULL;
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a BLOB arrives as an ArrayBuffer and goes back as the same BLOB
+    rc = db_exec(db, "SELECT js_create_scalar('identity', '(function(args){ return args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query_v2(db, "SELECT quote(identity(x'00ff10')), quote(identity(x'')), typeof(identity(zeroblob(3)));", (const char*[]){"X'00FF10'", "X''", "blob"}, 3);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // ArrayBuffers and typed arrays made in JavaScript, including a view of part of a buffer
+    rc = check_query_v2(db, "SELECT quote(js_eval('new Uint8Array([1, 2, 3])')), quote(js_eval('new Uint8Array([1, 2, 3, 4, 5]).subarray(1, 3)')), quote(js_eval('new Uint8Array([7, 8]).buffer')), quote(js_eval('new ArrayBuffer(0)'));", (const char*[]){"X'010203'", "X'0203'", "X'0708'", "X''"}, 4);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a function that makes a BLOB from a BLOB
+    rc = db_exec(db, "SELECT js_create_scalar('reverse_bytes', '(function(args){ return new Uint8Array(args[0]).reverse(); })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT quote(reverse_bytes(x'010203'));", "X'030201'");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a detached buffer has no bytes, so returning it is an error
+    rc = check_error(db, "SELECT js_eval('(function () { const b = new ArrayBuffer(4); b.transfer(); return b; })()');", "detached");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // db.exec() binds them as BLOBs too
+    rc = check_query(db, "SELECT js_eval('(function () { const rs = db.exec(\"SELECT quote(?), quote(?)\", new Uint8Array([1, 2]), new ArrayBuffer(0)); rs.next(); return rs.get(0) + \" \" + rs.get(1); })()');", "X'0102' X''");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a typed array that tracks the length of a resizable buffer has the buffer's current length,
+    // after the buffer shrinks (by 1 MB, so that reading the old length would read far past it)
+    // or grows
+    rc = check_query_v2(db, "SELECT quote(js_eval('(function () { const ab = new ArrayBuffer(16, { maxByteLength: 16 }); const u = new Uint8Array(ab); u.fill(7); ab.resize(2); return u; })()')), length(js_eval('(function () { const ab = new ArrayBuffer(1024 * 1024, { maxByteLength: 1024 * 1024 }); const u = new Uint8Array(ab); ab.resize(1); return u; })()')), length(js_eval('(function () { const ab = new ArrayBuffer(4, { maxByteLength: 16 }); const u = new Uint8Array(ab, 2); ab.resize(16); return u; })()'));", (const char*[]){"X'0707'", "1", "14"}, 3);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('(function () { const ab = new ArrayBuffer(1024 * 1024, { maxByteLength: 1024 * 1024 }); const u = new Uint8Array(ab); ab.resize(3); const rs = db.exec(\"SELECT length(?)\", u); rs.next(); return rs.get(0); })()');", "3");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a typed array of fixed length that a shrunken buffer no longer holds is an error
+    rc = check_error(db, "SELECT js_eval('(function () { const ab = new ArrayBuffer(16, { maxByteLength: 16 }); const u = new Uint8Array(ab, 0, 8); ab.resize(4); return u; })()');", "detached or resized");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // db.exec() throws for a buffer it cannot read, as returning it fails, instead of binding NULL
+    rc = check_query_v2(db, "SELECT js_eval('(function () { const ab = new ArrayBuffer(16, { maxByteLength: 16 }); const u = new Uint8Array(ab, 0, 8); ab.resize(4); try { db.exec(\"SELECT ?\", u); return \"bound\"; } catch (e) { return e.message; } })()'), js_eval('(function () { const b = new ArrayBuffer(4); b.transfer(); try { db.exec(\"SELECT ?\", b); return \"bound\"; } catch (e) { return \"thrown\"; } })()');", (const char*[]){"ArrayBuffer is detached or resized", "thrown"}, 2);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // a view's own offset and length count, not properties a script defines over them
+    rc = check_query_v2(db, "SELECT quote(js_eval('(function () { const u = new Uint8Array([1, 2, 3]).subarray(1, 2); Object.defineProperty(u, \"byteOffset\", { value: 0 }); Object.defineProperty(u, \"byteLength\", { value: 3 }); return u; })()')), js_eval('(function () { const u = new Uint8Array([1, 2, 3]).subarray(1, 2); Object.defineProperty(u, \"byteOffset\", { value: 0 }); const rs = db.exec(\"SELECT quote(?)\", u); rs.next(); return rs.get(0); })()');", (const char*[]){"X'02'", "X'02'"}, 2);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT quote(js_eval('(function () { Object.defineProperty(Object.getPrototypeOf(Uint8Array.prototype), \"byteOffset\", { get() { return 0; } }); return new Uint8Array([1, 2, 3]).subarray(2); })()'));", "X'03'");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: -
 
 int test_report(const char *description, int rc){
@@ -701,6 +760,7 @@ int main (void) {
     result += test_report("Direct only", test_direct_only());
     result += test_report("Aggregate errors", test_aggregate_errors());
     result += test_report("Exec errors", test_exec_errors());
+    result += test_report("Blobs", test_blobs());
 
     sqlite3_int64 current = 0;
     sqlite3_int64 highwater = 0;
