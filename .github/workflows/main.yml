@@ -331,22 +331,36 @@ jobs:
           echo "   Platform packages: 7"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: update Package.swift checksum and version
+      - name: update Package.swift and the package versions
         if: steps.tag.outputs.version != ''
         run: |
           VERSION=${{ steps.tag.outputs.version }}
+
+          # The versions the steps above publish under are written into the working copy but were
+          # never committed, so the repository kept showing whatever it was last committed with:
+          # packages/node/package.json said 1.1.14 and the Flutter pubspec 1.2.3 while the
+          # extension was at 1.4.1. For the node package that was not only confusing, since its
+          # optionalDependencies pinned the seven platform packages to that old version too, so
+          # an npm install in packages/node fetched binaries from long before the current source.
+          # package.json was rewritten by the publish step above; the pubspec is rewritten by
+          # flutter-package.yml after the tag, so it is done here as well to commit it with the
+          # rest. Its sed there is then a no-op, and stays as the safety net it is.
+          sed -i "s/^version: .*/version: $VERSION/" packages/flutter/pubspec.yaml
+
           ZIP="js-apple-xcframework-${VERSION}.zip"
           if [ -f "$ZIP" ]; then
             CHECKSUM=$(swift package compute-checksum "$ZIP")
             URL="https://github.com/sqliteai/sqlite-js/releases/download/${VERSION}/${ZIP}"
             sed -i "s|url: \".*apple-xcframework.*\"|url: \"${URL}\"|" Package.swift
             sed -i "s|checksum: \".*\"|checksum: \"${CHECKSUM}\"|" Package.swift
-            git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
-            git config --global user.name "$GITHUB_ACTOR"
-            git add Package.swift
-            git commit -m "Update Package.swift checksum for ${VERSION} [auto-update]" || true
-            git push origin main || true
           fi
+
+          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git config --global user.name "$GITHUB_ACTOR"
+          git add Package.swift packages/node/package.json packages/flutter/pubspec.yaml
+          # [auto-update] keeps the build job from running again for this commit
+          git commit -m "Update Package.swift and the package versions for ${VERSION} [auto-update]" || true
+          git push origin main || true
 
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
