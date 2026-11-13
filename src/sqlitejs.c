@@ -71,6 +71,7 @@ typedef struct {
     size_t              stack_size;     // in bytes, 0 for no check: see js_set_max_stack_size()
     int                 depth;          // calls into JavaScript in progress: see js_enter()
     struct rowset       *rowsets;       // result sets not yet freed: see js_end_rowsets()
+    bool                ending_rowsets; // js_end_rowsets() is running
 } globaljs_context;
 
 typedef struct {
@@ -246,13 +247,23 @@ static void js_rowset_finalizer(JSRuntime *rt, JSValue val) {
 // one that JavaScript keeps, in a global say, or that is garbage not yet collected, would make every
 // later statement fail with "interrupted" until the connection closed, the statements that could
 // release it included. Only to be called where none of them is being stepped: see js_leave().
+// Finalizing a statement can run JavaScript, the final of a window or aggregate function it was
+// computing, whose js_leave() comes back here and whose garbage collection can free result sets
+// of the list. So each statement is taken from its result set before it is finalized, the list
+// is walked again from its head after each one, and a nested call does nothing.
 static void js_end_rowsets (globaljs_context *js) {
-    for (rowset *rs = js->rowsets; rs; rs = rs->next) {
-        if (!rs->vm) continue;
-        sqlite3_finalize(rs->vm);
+    if (js->ending_rowsets) return;
+    js->ending_rowsets = true;
+    for (;;) {
+        rowset *rs = js->rowsets;
+        while (rs && !rs->vm) rs = rs->next;
+        if (!rs) break;
+        sqlite3_stmt *vm = rs->vm;
         rs->vm = NULL;
         rs->interrupted = true;
+        sqlite3_finalize(vm);
     }
+    js->ending_rowsets = false;
 }
 
 // MARK: - Initializer -

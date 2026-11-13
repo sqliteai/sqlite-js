@@ -590,6 +590,14 @@ int test_interrupt (void) {
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_query(db, "SELECT 1 + 2;", "3");
     if (rc != SQLITE_OK) goto abort_test;
+    // ending a result set that is computing a window function runs the function's final, which
+    // is JavaScript too: its end must not end the same result set again
+    rc = db_exec(db, "SELECT js_create_window('running_sum', 'total = 0;', '(function (args) { total += args[0]; })', '(function () { return total; })', '(function () { return total; })', '(function (args) { total -= args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = test_interrupt_sql(db, "SELECT js_eval('globalThis.held = db.exec(\"SELECT running_sum(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\"); held.next(); while (true) {}');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('held.next()');", "interrupted");
+    if (rc != SQLITE_OK) goto abort_test;
     
 abort_test:
     test_watchdog_stop = 1;
