@@ -404,6 +404,8 @@ JavaScript can run SQL on the same connection through the global `db` object. `d
 
 An error while the statement runs, such as a failed constraint, is thrown from `next()` or `toArray()`, as an error in the SQL itself is thrown from `db.exec()`.
 
+A result set does not outlive the call into JavaScript that created it. Its statement is still running until the result set ends, which holds a read transaction open and stops the connection from closing, so every one still open is ended when the call returns. Reading one afterwards throws rather than reporting the end of its rows, so keep what you need from a result set within the call that opens it. One read to its end, by `toArray()` or by `next()` until it returns false, is already finished and still reports the end of its rows.
+
 ```sql
 CREATE TABLE t(a UNIQUE);
 SELECT js_eval('db.exec("INSERT INTO t VALUES (?)", 1).next()');  -- 0: the row is inserted, and next() is false, as there are no rows
@@ -413,6 +415,8 @@ SELECT js_eval('(function () { try { db.exec("INSERT INTO t VALUES (?)", 1).next
 ### Interrupting JavaScript
 
 JavaScript runs inside the SQL statement that calls it, so `sqlite3_interrupt()` stops it as it stops any statement: the statement fails with an "interrupted" error, even if the code catches exceptions. In the `sqlite3` shell, Ctrl-C does this. Interrupting JavaScript needs SQLite 3.41.0 or later.
+
+The `db.exec()` result sets the interrupted JavaScript left open are ended as any others are, when the call returns — see **Running SQL from JavaScript**. That matters here because SQLite keeps an interrupt in effect until no statement of the connection is running, and an open result set is a running statement: leaving one open would make every later statement on the connection fail with "interrupted". One that JavaScript kept across an interrupt says "interrupted" when it is read, rather than naming the call that returned.
 
 ## Utility Functions
 
@@ -449,7 +453,7 @@ SELECT js_set_max_stack_size(0);        -- No check
 
 Sets the most memory, in bytes, that JavaScript may allocate on this connection; 0 means no limit. The default is 64 MB (64 × 1024 × 1024 bytes); build with `-DSQLITE_JS_DEFAULT_MEMORY_LIMIT=bytes` to change it. Code that needs more fails with an "out of memory" error, and the connection stays usable. JavaScript that catches the error receives `null` instead when the limit leaves no room even for the error.
 
-Garbage is collected before the limit is reached, and as the limit changes, so a new limit under the memory a connection has already allocated still leaves it usable. A limit under the memory that is still *in use*, such as a large value held in a global, is another matter: nothing can be allocated until the limit is raised again.
+Garbage is collected before the limit is reached, whenever an allocation fails with "out of memory", and whenever a limit is set, so a new limit under the memory a connection has already allocated still leaves it usable, and an allocation too large to fit beside the garbage succeeds when it is tried again. A limit under the memory that is still *in use*, such as a large value held in a global, is another matter: nothing can be allocated until the limit is raised again.
 
 ```sql
 SELECT js_set_memory_limit(268435456);  -- Allow 256 MB

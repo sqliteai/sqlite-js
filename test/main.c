@@ -723,6 +723,66 @@ abort_test:
     return rc;
 }
 
+// MARK: - Result set lifetime -
+
+// A db.exec() result set holds a statement that is still running, so it must not outlive the call
+// into JavaScript that created it, and dropping one that is partway through a query must not
+// finalize its statement where JavaScript cannot run.
+int test_rowset_lifetime (void) {
+    sqlite3 *db = NULL;
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // A result set dropped partway through a query that computes a JavaScript window function.
+    // Finalizing its statement runs the function's final, which is JavaScript, and the drop
+    // happens inside QuickJS's own freeing of the object: the final's allocations could start a
+    // collection that freed the object being freed, a use after free that crashed the process.
+    rc = db_exec(db, "SELECT js_create_window('wsum', 'n = 0;', '(function (args) { n += args[0]; })', "
+                     "'(function () { for (let i = 0; i < 50; i++) { const o = { a: [1, 2, 3] }; } return n; })', "
+                     "'(function () { return n; })', '(function (args) { n -= args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('for (let i = 0; i < 200; i++) { db.exec(\"SELECT wsum(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\").next(); } 7');", "7");
+    if (rc != SQLITE_OK) goto abort_test;
+    // the same where the result set is cyclic garbage, which the collector frees rather than the
+    // reference count, a use after free of its own
+    rc = check_query(db, "SELECT js_eval('for (let i = 0; i < 200; i++) { const r = db.exec(\"SELECT wsum(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\"); r.self = r; r.next(); } 7');", "7");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // A result set kept in a global is ended when the call returns, so reading it afterwards says
+    // so rather than looking like the end of its rows
+    rc = check_query(db, "SELECT js_eval('globalThis.held = db.exec(\"SELECT 1 UNION ALL SELECT 2\"); held.next() ? held.get(0) : 0');", "1");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('held.next()');", "closed when the call into JavaScript");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('held.toArray()');", "closed when the call into JavaScript");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('held.get(0)');", "closed when the call into JavaScript");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('held.name(0)');", "closed when the call into JavaScript");
+    if (rc != SQLITE_OK) goto abort_test;
+    // and a result set read to its end still reports the end of its rows, not an error
+    rc = check_query(db, "SELECT js_eval('const r = db.exec(\"SELECT 1\"); r.toArray(); r.toArray().length');", "0");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // The connection closes: a statement left running would make sqlite3_close() return
+    // SQLITE_BUSY, and sqlite3_close_v2() leave the connection and its JavaScript runtime behind
+    // for good, since only closing frees the result set that holds the statement.
+    rc = db_exec(db, "SELECT js_eval('globalThis.held = db.exec(\"SELECT 1 UNION ALL SELECT 2\"); held.next(); 0');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = sqlite3_close(db);
+    db = NULL;
+    if (rc != SQLITE_OK) {
+        printf("FAIL: sqlite3_close() with a result set kept in a global\n      Expected: SQLITE_OK, Got: rc %d\n", rc);
+        return rc;
+    }
+    return SQLITE_OK;
+
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
 // MARK: - Blobs -
 
 int test_blobs (void) {
@@ -1057,6 +1117,26 @@ typedef struct {
     int         rc;
 } stack_thread_args;
 
+// How deep deep() is asked to go on the small thread stacks below. A level of JavaScript
+// recursion takes about 1.5 KB of native stack in an ordinary build, so 100 levels fit easily in
+// the 512 KB that a 768 KB thread leaves after SQLITE_JS_STACK_MARGIN. Under a sanitizer a level
+// takes several times that and 100 levels do not fit, so the stack check stops deep() with an
+// error and the test fails where nothing is wrong: 50 levels still fit, and 32 leaves room.
+// __has_feature cannot be tested in the same #if that checks for it: GCC before 14 does not have
+// it at all and rejects the line, so the test is nested.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define TEST_SANITIZED      1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define TEST_SANITIZED      1
+#endif
+#endif
+#ifdef TEST_SANITIZED
+#define TEST_STACK_DEPTH    32
+#else
+#define TEST_STACK_DEPTH    100
+#endif
+
 // Creates deep(n), which calls itself n levels deep, and forever(), which calls itself without end.
 static int stack_thread_functions (sqlite3 *db) {
     int rc = db_exec(db, "SELECT js_create_scalar('deep', '(function (args) { return (function f(n) { return (n === 0) ? 0 : 1 + f(n - 1); })(args[0]); })');");
@@ -1117,11 +1197,10 @@ static int stack_thread (void *(*fn)(void *), stack_thread_args *args, size_t st
 // the stack from the thread that opened the connection, so on another thread JavaScript failed at
 // once with "Maximum call stack size exceeded", or code that called itself without end crashed.
 int test_stack_threads (void) {
-    // each level of JavaScript recursion takes about 1.5 KB of native stack, and the small stack
-    // below leaves about 500 KB after SQLITE_JS_STACK_MARGIN. It is under JS_DEFAULT_STACK_SIZE,
-    // so the size is still lowered to fit, with room to spare for a build whose frames are
-    // larger, such as one under AddressSanitizer.
-    stack_thread_args args = {NULL, 100, SQLITE_OK};
+    // the small stacks below leave about 500 KB after SQLITE_JS_STACK_MARGIN, which is under
+    // JS_DEFAULT_STACK_SIZE, so the size is still lowered to fit. See TEST_STACK_DEPTH for how
+    // deep deep() goes in it.
+    stack_thread_args args = {NULL, TEST_STACK_DEPTH, SQLITE_OK};
 
     // opened on this thread, used on another. The stack of that thread is asked for rather than
     // left to the platform, whose default is 8 MB on Linux but 512 KB on macOS, which leaves
@@ -1171,6 +1250,7 @@ int main (void) {
     result += test_report("Direct only", test_direct_only());
     result += test_report("Aggregate errors", test_aggregate_errors());
     result += test_report("Exec errors", test_exec_errors());
+    result += test_report("Result set lifetime", test_rowset_lifetime());
     result += test_report("Blobs", test_blobs());
     result += test_report("Numbers", test_numbers());
     result += test_report("Memory limit", test_memory_limit());
