@@ -900,6 +900,38 @@ int test_memory_limit (void) {
     rc = check_query(db, "SELECT js_eval('[1, 2, 3].map(x => x * 2).join()');", "2,4,6");
     if (rc != SQLITE_OK) goto abort_test;
 
+    // and so does a lower limit set above it: the garbage would fill the room left under the new
+    // limit, and an allocation that needs that room would fail
+    if (db) sqlite3_close(db);
+    db = NULL;
+    rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_set_memory_limit(0);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('globalThis.g = []; for (let i = 0; i < 200000; i++) { const o = {}; o.o = o; g.push(o); } g.length');", "200000");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_eval('delete globalThis.g; 0');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_set_memory_limit(32 * 1024 * 1024);");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('new ArrayBuffer(16 * 1024 * 1024).byteLength');", "16777216");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // garbage that leaves no room for a large allocation is collected after it fails, so the next
+    // try succeeds: QuickJS refuses an allocation that would pass the limit before making it, so
+    // the memory in use never comes near the limit, and nothing else would collect the garbage
+    if (db) sqlite3_close(db);
+    db = NULL;
+    rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('globalThis.g = []; for (let i = 0; i < 40; i++) { const o = { b: new ArrayBuffer(1024 * 1024) }; o.o = o; g.push(o); } g.length');", "40");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_eval('delete globalThis.g; 0');");
+    if (rc != SQLITE_OK) goto abort_test;
+    sqlite3_exec(db, "SELECT js_eval('new ArrayBuffer(30 * 1024 * 1024).byteLength');", NULL, NULL, NULL);   // may fail
+    rc = check_query(db, "SELECT js_eval('new ArrayBuffer(30 * 1024 * 1024).byteLength');", "31457280");
+    if (rc != SQLITE_OK) goto abort_test;
+
     // running out of memory through many small allocations, which leaves no room for the error
     // object, is reported as "out of memory" too
     rc = check_error(db, "SELECT js_eval('(function () { let h = null; for (;;) h = {n: h}; })()');", "out of memory");
