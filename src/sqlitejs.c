@@ -363,6 +363,30 @@ static void js_mem_reset_peak (globaljs_context *js) {
 #define SQLITE_JS_STACK_MIN     (32 * 1024)
 #endif
 
+#if defined(__linux__)
+// The high address of the initial thread's stack, as the kernel sees it, read from
+// /proc/self/maps, or 0 where it cannot be read. pthread_attr_getstack() reaches only to the top
+// of what the program may use, which is below the block of argv, environment and auxiliary vector
+// that the kernel puts at the top of the stack; RLIMIT_STACK is counted from above that block. A
+// bound counted from pthread's top therefore lands below the real one by the size of the block,
+// which Linux lets grow to a quarter of RLIMIT_STACK: 2 MB of an 8 MB stack.
+static uintptr_t js_stack_kernel_top (void) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) return 0;
+    char line[512];
+    uintptr_t high = 0;
+    while (fgets(line, sizeof(line), maps)) {
+        if (strstr(line, "[stack]")) {
+            unsigned long long low = 0, hi = 0;
+            if (sscanf(line, "%llx-%llx", &low, &hi) == 2) high = (uintptr_t)hi;
+            break;
+        }
+    }
+    fclose(maps);
+    return high;
+}
+#endif
+
 // The lowest address of the calling thread's stack, found once per thread: on Linux, finding the
 // main thread's stack reads /proc/self/maps. Returns false where the stack cannot be found.
 static bool js_stack_low (uintptr_t sp, uintptr_t *low) {
@@ -395,13 +419,24 @@ static bool js_stack_low (uintptr_t sp, uintptr_t *low) {
     // RLIMIT_STACK is how far it may grow, so for that thread it is the bound that counts.
     if (syscall(SYS_gettid) == (long)getpid()) {
         struct rlimit limit;
-        if ((getrlimit(RLIMIT_STACK, &limit) == 0) && (limit.rlim_cur != RLIM_INFINITY)) {
-            // counted from the top of the stack, as the kernel counts it: counted from sp, a first
-            // measurement deep in the stack would put the bound below the real one
-            uintptr_t high = (uintptr_t)addr + size;
-            uintptr_t grows_to = (high > (uintptr_t)limit.rlim_cur) ? high - (uintptr_t)limit.rlim_cur : 0;
-            if (grows_to < thread_low) thread_low = grows_to;
+        if ((getrlimit(RLIMIT_STACK, &limit) != 0) || (limit.rlim_cur == RLIM_INFINITY)) {
+            // Without a finite RLIMIT_STACK there is no bound to measure, and glibc then reports
+            // a stack of nearly the whole address space: about 85 TB, which
+            // js_set_max_stack_size() would offer and accept, and code that calls itself without
+            // end would take the memory of the machine until it was killed. So the stack counts
+            // as unmeasurable, which allows up to the default the thread certainly has.
+            thread_low = 0;
+            thread_unknown = true;
+            return false;
         }
+        // counted from the top of the stack, as the kernel counts it: counted from sp, a first
+        // measurement deep in the stack would put the bound below the real one. The kernel's own
+        // top is above the argv and environment block, which pthread's does not reach, so that
+        // one is only the fallback: see js_stack_kernel_top().
+        uintptr_t high = js_stack_kernel_top();
+        if (high == 0) high = (uintptr_t)addr + size;
+        uintptr_t grows_to = (high > (uintptr_t)limit.rlim_cur) ? high - (uintptr_t)limit.rlim_cur : 0;
+        if (grows_to < thread_low) thread_low = grows_to;
     }
 #else
     UNUSED(sp);
