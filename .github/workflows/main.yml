@@ -1,10 +1,12 @@
 name: build, test and release sqlite-js
 on:
+  # Pushes to main only: a pull request from a branch of this repository would otherwise run
+  # everything twice, once for the push and once for the pull request. Use the workflow_dispatch
+  # below to run this on a branch of its own (gh workflow run main.yml --ref <branch>).
   push:
     branches:
-      - '**'
-    tags-ignore:
-      - '**'
+      - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -74,6 +76,14 @@ jobs:
       run:
         shell: ${{ matrix.container && 'sh' || 'bash' }}
 
+    env:
+      # A pull request from a fork gets no secrets, so there is nothing to sign or notarize with:
+      # those steps are skipped there and the build and the tests, which is what the pull request
+      # is for, still run. The artifacts of such a run are unsigned, and the release job below
+      # runs only for main, so they are never released. Secrets can be read here but not in a
+      # step's if, which is why this is an env entry.
+      SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+
     steps:
 
       - uses: actions/checkout@v4.2.2
@@ -112,7 +122,7 @@ jobs:
         run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
 
       - name: create keychain for codesign
-        if: matrix.os == 'macos-15'
+        if: matrix.os == 'macos-15' && env.SIGNING == 'true'
         run: |
           echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > certificate.p12
           security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
@@ -122,7 +132,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
 
       - name: codesign and notarize dylib
-        if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework'
+        if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework' && env.SIGNING == 'true'
         run: |
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/js.dylib
           ditto -c -k dist/js.dylib dist/js.zip
@@ -130,7 +140,7 @@ jobs:
           rm dist/js.zip
 
       - name: codesign and notarize xcframework
-        if: matrix.name == 'apple-xcframework'
+        if: matrix.name == 'apple-xcframework' && env.SIGNING == 'true'
         run: |
           find dist/js.xcframework -name "*.framework" -exec echo "Signing: {}" \; -exec codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime {} \; # Sign each individual framework FIRST
           codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/js.xcframework # Then sign the xcframework wrapper
@@ -139,7 +149,7 @@ jobs:
           rm -rf dist/js.xcframework
 
       - name: cleanup keychain for codesign
-        if: matrix.os == 'macos-15'
+        if: matrix.os == 'macos-15' && env.SIGNING == 'true'
         run: |
           rm certificate.p12
           security delete-keychain build.keychain
