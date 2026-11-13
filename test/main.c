@@ -586,7 +586,7 @@ int test_interrupt (void) {
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_error(db, "SELECT js_eval('held.next()');", "interrupted");
     if (rc != SQLITE_OK) goto abort_test;
-    rc = test_interrupt_sql(db, "SELECT js_eval('(function () { const r = db.exec(\"SELECT 1 UNION ALL SELECT 2\"); r.next(); while (true) {} })()');");
+    rc = test_interrupt_sql(db, "SELECT js_eval('(function () { const r = db.exec(\"SELECT 1 UNION ALL SELECT 2\"); r.self = r; r.next(); while (true) {} })()');");
     if (rc != SQLITE_OK) goto abort_test;
     rc = check_query(db, "SELECT 1 + 2;", "3");
     if (rc != SQLITE_OK) goto abort_test;
