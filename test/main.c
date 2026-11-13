@@ -1117,6 +1117,26 @@ typedef struct {
     int         rc;
 } stack_thread_args;
 
+// How deep deep() is asked to go on the small thread stacks below. A level of JavaScript
+// recursion takes about 1.5 KB of native stack in an ordinary build, so 100 levels fit easily in
+// the 512 KB that a 768 KB thread leaves after SQLITE_JS_STACK_MARGIN. Under a sanitizer a level
+// takes several times that and 100 levels do not fit, so the stack check stops deep() with an
+// error and the test fails where nothing is wrong: 50 levels still fit, and 32 leaves room.
+// __has_feature cannot be tested in the same #if that checks for it: GCC before 14 does not have
+// it at all and rejects the line, so the test is nested.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define TEST_SANITIZED      1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define TEST_SANITIZED      1
+#endif
+#endif
+#ifdef TEST_SANITIZED
+#define TEST_STACK_DEPTH    32
+#else
+#define TEST_STACK_DEPTH    100
+#endif
+
 // Creates deep(n), which calls itself n levels deep, and forever(), which calls itself without end.
 static int stack_thread_functions (sqlite3 *db) {
     int rc = db_exec(db, "SELECT js_create_scalar('deep', '(function (args) { return (function f(n) { return (n === 0) ? 0 : 1 + f(n - 1); })(args[0]); })');");
@@ -1177,11 +1197,10 @@ static int stack_thread (void *(*fn)(void *), stack_thread_args *args, size_t st
 // the stack from the thread that opened the connection, so on another thread JavaScript failed at
 // once with "Maximum call stack size exceeded", or code that called itself without end crashed.
 int test_stack_threads (void) {
-    // each level of JavaScript recursion takes about 1.5 KB of native stack, and the small stack
-    // below leaves about 500 KB after SQLITE_JS_STACK_MARGIN. It is under JS_DEFAULT_STACK_SIZE,
-    // so the size is still lowered to fit, with room to spare for a build whose frames are
-    // larger, such as one under AddressSanitizer.
-    stack_thread_args args = {NULL, 100, SQLITE_OK};
+    // the small stacks below leave about 500 KB after SQLITE_JS_STACK_MARGIN, which is under
+    // JS_DEFAULT_STACK_SIZE, so the size is still lowered to fit. See TEST_STACK_DEPTH for how
+    // deep deep() goes in it.
+    stack_thread_args args = {NULL, TEST_STACK_DEPTH, SQLITE_OK};
 
     // opened on this thread, used on another. The stack of that thread is asked for rather than
     // left to the platform, whose default is 8 MB on Linux but 512 KB on macOS, which leaves
