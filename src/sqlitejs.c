@@ -70,6 +70,8 @@ typedef struct {
     size_t              mem_peak;       // the most in use since the last result or error
     size_t              stack_size;     // in bytes, 0 for no check: see js_set_max_stack_size()
     int                 depth;          // calls into JavaScript in progress: see js_enter()
+    struct rowset       *rowsets;       // result sets not yet freed: see js_end_rowsets()
+    bool                ending_rowsets; // js_end_rowsets() is running
 } globaljs_context;
 
 typedef struct {
@@ -106,9 +108,11 @@ static JSValue sqlite_value_to_js (JSContext *ctx, sqlite3_value *value);
 
 // MARK: - RowSet -
 
-typedef struct {
+typedef struct rowset {
     int             ncols;
     sqlite3_stmt    *vm;
+    bool            interrupted;    // ended by js_end_rowsets(): reading on throws
+    struct rowset   *prev, *next;   // in the connection's list: see js_end_rowsets()
 } rowset;
 
 static void js_rowset_finalizer(JSRuntime *rt, JSValue val);
@@ -137,7 +141,7 @@ static JSValue js_rowset_next(JSContext *ctx, JSValueConst this_val, int argc, J
     rowset *rs = JS_GetOpaque(this_val, js->rowSetClassID);
     if (!rs) return JS_ThrowTypeError(ctx, "Not a Rowset object");
     
-    if (!rs->vm) return JS_FALSE;
+    if (!rs->vm) return rs->interrupted ? JS_ThrowInternalError(ctx, "interrupted") : JS_FALSE;
     int rc = sqlite3_step(rs->vm);
     if (rc == SQLITE_ROW) return JS_TRUE;
 
@@ -189,7 +193,7 @@ static JSValue js_rowset_to_array(JSContext *ctx, JSValueConst this_val, int arg
     globaljs_context *js = JS_GetContextOpaque(ctx);
     rowset *rs = JS_GetOpaque(this_val, js->rowSetClassID);
     if (!rs) return JS_ThrowTypeError(ctx, "Not a Rowset object");
-    if (!rs->vm) return JS_NewArray(ctx);
+    if (!rs->vm) return rs->interrupted ? JS_ThrowInternalError(ctx, "interrupted") : JS_NewArray(ctx);
 
     JSValue result = JS_NewArray(ctx);
     if (JS_IsException(result)) return JS_EXCEPTION;
@@ -231,8 +235,35 @@ static void js_rowset_finalizer(JSRuntime *rt, JSValue val) {
     rowset *rs = (rowset *)JS_GetOpaque(val, js->rowSetClassID);
     if (!rs) return;
     
+    if (rs->prev) rs->prev->next = rs->next;
+    else if (js->rowsets == rs) js->rowsets = rs->next;
+    if (rs->next) rs->next->prev = rs->prev;
     if (rs->vm) sqlite3_finalize(rs->vm);
     sqlite3_free(rs);
+}
+
+// Ends every result set of the connection that is still open. SQLite keeps an interrupt in effect
+// until no statement of the connection is running, and an open result set is a running statement:
+// one that JavaScript keeps, in a global say, or that is garbage not yet collected, would make every
+// later statement fail with "interrupted" until the connection closed, the statements that could
+// release it included. Only to be called where none of them is being stepped: see js_leave().
+// Finalizing a statement can run JavaScript, the final of a window or aggregate function it was
+// computing, whose js_leave() comes back here and whose garbage collection can free result sets
+// of the list. So each statement is taken from its result set before it is finalized, the list
+// is walked again from its head after each one, and a nested call does nothing.
+static void js_end_rowsets (globaljs_context *js) {
+    if (js->ending_rowsets) return;
+    js->ending_rowsets = true;
+    for (;;) {
+        rowset *rs = js->rowsets;
+        while (rs && !rs->vm) rs = rs->next;
+        if (!rs) break;
+        sqlite3_stmt *vm = rs->vm;
+        rs->vm = NULL;
+        rs->interrupted = true;
+        sqlite3_finalize(vm);
+    }
+    js->ending_rowsets = false;
 }
 
 // MARK: - Initializer -
@@ -448,8 +479,11 @@ static void js_enter (globaljs_context *js) {
     JS_SetMaxStackSize(js->runtime, size);
 }
 
+// Once the outermost call has returned, no result set is being stepped, so those an interrupt left
+// open are ended here: see js_end_rowsets().
 static void js_leave (globaljs_context *js) {
-    js->depth--;
+    if (--js->depth > 0) return;
+    if ((sqlite3_libversion_number() >= 3041000) && js->db && sqlite3_is_interrupted(js->db)) js_end_rowsets(js);
 }
 
 static globaljs_context *globaljs_init (sqlite3 *db) {
@@ -784,12 +818,18 @@ static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql, int
     if (!rs) goto abort_with_dberror;
     rs->vm = vm;
     rs->ncols = sqlite3_column_count(vm);
+    rs->interrupted = false;
+    rs->prev = rs->next = NULL;
     
     // create Rowset JS object
     globaljs_context *js = JS_GetContextOpaque(ctx);    
     JSValue obj = JS_NewObjectClass(ctx, js->rowSetClassID);
     if (JS_IsException(obj)) goto abort_with_jserror;
     JS_SetOpaque(obj, rs);
+    // listed once the object owns it, since its finalizer unlists it
+    rs->next = js->rowsets;
+    if (js->rowsets) js->rowsets->prev = rs;
+    js->rowsets = rs;
     JS_SetPropertyStr(ctx, obj, "columnCount", JS_NewInt32(ctx, rs->ncols));
     
     return obj;
