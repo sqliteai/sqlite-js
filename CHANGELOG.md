@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.4.2] - 2026-11-13
+
+One change in this release can alter the behavior of JavaScript that works on 1.4.1: a `db.exec()`
+result set no longer outlives the call into JavaScript that created it, so reading one in a later
+call throws where it reported the end of its rows. See **Changed**. The rest is fixes, two of them
+for crashes: a result set dropped partway through a query that computes a JavaScript window
+function, and runaway recursion on a stack the check had measured wrongly.
 
 ### Changed
 
