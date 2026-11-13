@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>   // strtoll, in the stack size test
+#include <errno.h>    // EINVAL, in the stack-on-other-threads test
 #include "sqlite3.h"
 #include "sqlitejs.h"
 #include <pthread.h>
@@ -1053,15 +1054,29 @@ static void *stack_thread_tiny (void *ptr) {
     return NULL;
 }
 
-// Runs fn(args) on a new thread with a stack of stack_size bytes, or the default if 0.
+// Runs fn(args) on a new thread with a stack of stack_size bytes, or the default if 0. Returns
+// SQLITE_NOTFOUND where the platform has no stack that small, which a case that needs an unusually
+// small one skips rather than reporting as a failure: PTHREAD_STACK_MIN is 128 KB on aarch64 glibc,
+// where a 64 KB stack cannot be had at all, and it is a run-time value there rather than a constant.
 static int stack_thread (void *(*fn)(void *), stack_thread_args *args, size_t stack_size) {
     pthread_attr_t attr;
     pthread_t thread;
-    if (pthread_attr_init(&attr) != 0) return SQLITE_ERROR;
-    if (stack_size > 0 && pthread_attr_setstacksize(&attr, stack_size) != 0) { pthread_attr_destroy(&attr); return SQLITE_ERROR; }
+    if (pthread_attr_init(&attr) != 0) { printf("FAIL: pthread_attr_init\n"); return SQLITE_ERROR; }
+    if (stack_size > 0) {
+        int set = pthread_attr_setstacksize(&attr, stack_size);
+        if (set != 0) {
+            pthread_attr_destroy(&attr);
+            if (set == EINVAL) {
+                printf("SKIP: this platform has no thread stack of %zu bytes\n", stack_size);
+                return SQLITE_NOTFOUND;
+            }
+            printf("FAIL: a thread stack of %zu bytes: error %d\n", stack_size, set);
+            return SQLITE_ERROR;
+        }
+    }
     int rc = pthread_create(&thread, &attr, fn, args);
     pthread_attr_destroy(&attr);
-    if (rc != 0) return SQLITE_ERROR;
+    if (rc != 0) { printf("FAIL: pthread_create: error %d\n", rc); return SQLITE_ERROR; }
     pthread_join(thread, NULL);
     return args->rc;
 }
@@ -1103,8 +1118,10 @@ int test_stack_threads (void) {
     if (rc != SQLITE_OK) goto abort_test;
 
     // and on a thread with less stack left than SQLITE_JS_STACK_MIN: the size is still lowered to
-    // fit, since the default would let code that calls itself without end run past the stack
+    // fit, since the default would let code that calls itself without end run past the stack.
+    // Skipped where the platform has no stack that small, as aarch64 glibc has not.
     rc = stack_thread(stack_thread_forever, &args, 64 * 1024);
+    if (rc == SQLITE_NOTFOUND) rc = SQLITE_OK;
     if (rc != SQLITE_OK) goto abort_test;
 
     // a thread whose whole stack is under twice the margin still gets a usable runtime
