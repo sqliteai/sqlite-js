@@ -577,6 +577,20 @@ int test_interrupt (void) {
     rc = test_interrupt_sql(db, "SELECT js_eval('for (;;) { try { while (true) {} } catch (e) {} }');");
     if (rc != SQLITE_OK) goto abort_test;
     
+    // A result set left open, kept in a global or garbage not yet collected, is a statement still
+    // running, and SQLite keeps an interrupt in effect until none is: every later statement on the
+    // connection failed. The interrupted call ends them, and the kept one then throws.
+    rc = test_interrupt_sql(db, "SELECT js_eval('globalThis.held = db.exec(\"SELECT 1 UNION ALL SELECT 2\"); held.next(); while (true) {}');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT 1 + 2;", "3");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('held.next()');", "interrupted");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = test_interrupt_sql(db, "SELECT js_eval('(function () { const r = db.exec(\"SELECT 1 UNION ALL SELECT 2\"); r.next(); while (true) {} })()');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT 1 + 2;", "3");
+    if (rc != SQLITE_OK) goto abort_test;
+    
 abort_test:
     test_watchdog_stop = 1;
     if (watching) pthread_join(watchdog, NULL);
