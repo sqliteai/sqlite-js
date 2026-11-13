@@ -1,6 +1,6 @@
 {
   "name": "@sqliteai/sqlite-js",
-  "version": "1.1.14",
+  "version": "1.4.2",
   "description": "SQLite JS extension for Node.js - Custom SQLite functions in JavaScript",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -53,13 +53,13 @@
     "node": ">=16.0.0"
   },
   "optionalDependencies": {
-    "@sqliteai/sqlite-js-darwin-arm64": "1.1.14",
-    "@sqliteai/sqlite-js-darwin-x86_64": "1.1.14",
-    "@sqliteai/sqlite-js-linux-arm64": "1.1.14",
-    "@sqliteai/sqlite-js-linux-arm64-musl": "1.1.14",
-    "@sqliteai/sqlite-js-linux-x86_64": "1.1.14",
-    "@sqliteai/sqlite-js-linux-x86_64-musl": "1.1.14",
-    "@sqliteai/sqlite-js-win32-x86_64": "1.1.14"
+    "@sqliteai/sqlite-js-darwin-arm64": "1.4.2",
+    "@sqliteai/sqlite-js-darwin-x86_64": "1.4.2",
+    "@sqliteai/sqlite-js-linux-arm64": "1.4.2",
+    "@sqliteai/sqlite-js-linux-arm64-musl": "1.4.2",
+    "@sqliteai/sqlite-js-linux-x86_64": "1.4.2",
+    "@sqliteai/sqlite-js-linux-x86_64-musl": "1.4.2",
+    "@sqliteai/sqlite-js-win32-x86_64": "1.4.2"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
