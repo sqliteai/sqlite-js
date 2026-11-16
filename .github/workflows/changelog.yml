@@ -2,8 +2,11 @@ name: Release and Update Website Changelog
 
 on:
   push:
+    # The release job of main.yml tags with the bare version from SQLITE_JS_VERSION, 1.4.3 and not
+    # v1.4.3, so a "v*.*.*" pattern here never matched and this workflow only ever ran by hand.
+    # Same pattern as flutter-package.yml, which has always had it right.
     tags:
-      - "v*.*.*"
+      - "*.*.*"
   workflow_dispatch:
     inputs:
       test_version:
