@@ -71,6 +71,7 @@ typedef struct {
     size_t              stack_size;     // in bytes, 0 for no check: see js_set_max_stack_size()
     int                 depth;          // calls into JavaScript in progress: see js_enter()
     unsigned            cancel_epoch;   // js_cancel_epoch when the outermost call began
+    int                 setup_depth;    // depth of a call that sets the connection up, 0 for none: see js_interrupt_handler()
     bool                check_interrupted;  // sqlite3_is_interrupted() is available
     struct rowset       *rowsets;       // result sets not yet freed: see js_end_rowsets()
     int                 orphans;        // of those, the ones whose JavaScript object is gone
@@ -351,8 +352,10 @@ static unsigned js_cancel_epoch_load (void) {
 }
 
 // Stops all JavaScript that is running now, in every connection: each call fails with an
-// "interrupted" error, and the statement that called it is interrupted. JavaScript that begins
-// afterwards runs normally. Safe from any thread.
+// "interrupted" error, and the connection it was running on is interrupted, so every statement
+// that connection has in progress fails with SQLITE_INTERRUPT too (see js_interrupt_handler).
+// JavaScript that begins afterwards runs normally, and the JavaScript the extension itself runs
+// to set a connection up is never stopped. Safe from any thread.
 // For hosts whose own cancelling cannot reach JavaScript: Android cancels a query with a
 // progress handler, which SQLite never calls while a JavaScript function runs.
 void sqlitejs_cancel_all (void) {
@@ -370,11 +373,16 @@ static int js_interrupt_handler (JSRuntime *rt, void *opaque) {
     UNUSED(rt);
     globaljs_context *js = (globaljs_context *)opaque;
     js_keep_gc_below_limit(js);
-    // Only a call (see js_enter) is cancelled. The one exception is the JavaScript the extension
-    // itself runs while it initialises a connection (globaljs_init, depth 0): stopping it would
-    // make the connection fail to load. Stored functions loaded by js_init_table run as a call,
-    // so they can be cancelled.
-    if ((js->depth > 0) && (js->cancel_epoch != js_cancel_epoch_load())) {
+    // Only a call (see js_enter) is cancelled, and never the JavaScript the extension itself runs
+    // to set a connection up: while it loads the extension (globaljs_init, depth 0), and while
+    // js_init_table(1) restores the functions of the js_functions table (js_create_common, which
+    // records its depth in setup_depth). Stopping either leaves the connection short of what an
+    // app expects of it: a cancel during the first made it fail to load, and one during the second
+    // left it without its stored functions, each reported only by a statement an app need not look
+    // at. Like the depth 0 exemption, this one covers that call alone: JavaScript the loading code
+    // runs through SQL is a call of its own, at a greater depth, and is cancelled. And on SQLite
+    // 3.41 and later sqlite3_interrupt() still stops setup JavaScript that never ends, as always.
+    if ((js->depth > 0) && (js->depth != js->setup_depth) && (js->cancel_epoch != js_cancel_epoch_load())) {
         // The statement is interrupted too: a collation cannot report an error, so the
         // statement would go on calling JavaScript, each call beginning after the cancel.
         if (js->db) sqlite3_interrupt(js->db);
@@ -1668,7 +1676,15 @@ static bool js_create_function (sqlite3_context *context, const char *type, cons
 bool js_create_common (sqlite3_context *context, const char *type, const char *name, const char *init_code, const char *step_code, const char *final_code, const char *value_code, const char *inverse_code, bool is_load) {
     globaljs_context *js = (globaljs_context *)sqlite3_user_data(context);
     js_enter(js);
+    // Restoring a function of the js_functions table (is_load) sets the connection up, as loading
+    // the extension does, so sqlitejs_cancel_all() does not stop it: see js_interrupt_handler().
+    // Only this call is exempt, not JavaScript it runs through SQL, which is a call of its own at
+    // a greater depth. The previous value is kept for an is_load that a stored function's own code
+    // reaches through js_init_table().
+    int setup_depth = js->setup_depth;
+    if (is_load) js->setup_depth = js->depth;
     bool ok = js_create_function(context, type, name, init_code, step_code, final_code, value_code, inverse_code, is_load);
+    js->setup_depth = setup_depth;
     js_leave(js);
     return ok;
 }
