@@ -75,6 +75,7 @@ typedef struct {
     struct rowset       *rowsets;       // result sets not yet freed: see js_end_rowsets()
     int                 orphans;        // of those, the ones whose JavaScript object is gone
     bool                ending_rowsets; // js_end_rowsets() is running
+    unsigned            end_pass;       // js_end_rowsets() passes that ended every result set
 } globaljs_context;
 
 typedef struct {
@@ -117,6 +118,7 @@ typedef struct rowset {
     bool            ended;          // ended by js_end_rowsets(): reading on throws
     bool            interrupted;    // and an interrupt is why: reading on throws "interrupted"
     bool            orphaned;       // its JavaScript object is gone: see js_rowset_finalizer()
+    unsigned        end_pass;       // the js_end_rowsets() pass that ended it
     struct rowset   *prev, *next;   // in the connection's list: see js_end_rowsets()
 } rowset;
 
@@ -272,9 +274,12 @@ static void js_rowset_finalizer(JSRuntime *rt, JSValue val) {
 // computing, whose js_leave() comes back here and whose garbage collection can free result sets
 // of the list. So each statement is taken from its result set before it is finalized, the list
 // is walked again from its head after each one, and a nested call does nothing.
+static unsigned js_cancel_epoch_load (void);
+
 static void js_end_rowsets (globaljs_context *js, bool all, bool interrupted) {
     if (js->ending_rowsets) return;
     js->ending_rowsets = true;
+    unsigned pass = all ? ++js->end_pass : 0;
     for (;;) {
         rowset *rs = js->rowsets;
         while (rs && !(rs->orphaned || (all && rs->vm))) rs = rs->next;
@@ -291,9 +296,16 @@ static void js_end_rowsets (globaljs_context *js, bool all, bool interrupted) {
         } else {
             rs->vm = NULL;
             rs->ended = true;
+            rs->end_pass = pass;
             if (interrupted) rs->interrupted = true;
         }
         if (vm) sqlite3_finalize(vm);
+    }
+    // A cancel that landed while the finals ran stopped them, as one before the call returned
+    // would have: the result sets this pass ended read on as interrupted too. Nothing runs
+    // JavaScript here, so the list holds only result sets that are still allocated.
+    if (all && !interrupted && (js->cancel_epoch != js_cancel_epoch_load())) {
+        for (rowset *r = js->rowsets; r; r = r->next) if (r->ended && (r->end_pass == pass)) r->interrupted = true;
     }
     js->ending_rowsets = false;
 }
@@ -576,7 +588,10 @@ static bool js_stack_room (size_t *room) {
 // runs JavaScript) is on the same thread and keeps the outer call's limit.
 static void js_enter (globaljs_context *js) {
     if (js->depth++ > 0) return;
-    js->cancel_epoch = js_cancel_epoch_load();
+    // The finals that ending a call's result sets runs (see js_leave) belong to that call: they keep
+    // its epoch, so a cancel during the call or during the ending stops them, as it would have
+    // stopped the call. Before SQLite 3.41 nothing else would stop one that never ends.
+    if (!js->ending_rowsets) js->cancel_epoch = js_cancel_epoch_load();
     JS_UpdateStackTop(js->runtime);
     // A thread with less room than SQLITE_JS_STACK_MIN keeps it too: JavaScript there then fails
     // with "Maximum call stack size exceeded" rather than running past the end of the stack. A
@@ -591,7 +606,10 @@ static void js_enter (globaljs_context *js) {
 static void js_leave (globaljs_context *js) {
     if (--js->depth > 0) return;
     if (!js->rowsets) return;
-    bool interrupted = (sqlite3_libversion_number() >= 3041000) && js->db && sqlite3_is_interrupted(js->db);
+    // A cancel (sqlitejs_cancel_all) during the call interrupted it, and before SQLite 3.41 is
+    // the only interrupt that shows: its result sets read on as interrupted.
+    bool cancelled = (js->cancel_epoch != js_cancel_epoch_load());
+    bool interrupted = cancelled || ((sqlite3_libversion_number() >= 3041000) && js->db && sqlite3_is_interrupted(js->db));
     js_end_rowsets(js, true, interrupted);
 }
 

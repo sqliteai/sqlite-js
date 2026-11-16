@@ -1060,6 +1060,14 @@ static void test_started (sqlite3_context *context, int argc, sqlite3_value **ar
     sqlite3_result_null(context);
 }
 
+// Cancels from inside the statement under test: the cancel lands before the call returns, but
+// after its JavaScript last checked for one
+static void test_cancel_now (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    (void)argc; (void)argv;
+    sqlitejs_cancel_all();
+    sqlite3_result_null(context);
+}
+
 static void *test_cancel_all_worker (void *ptr) {
     (void)ptr;
     // wait for the JavaScript to start, for at most 10 s; cancelling before it starts would
@@ -1133,6 +1141,33 @@ int test_cancel_all (void) {
     if (pthread_create(&thread, NULL, test_cancel_all_worker, NULL) != 0) { rc = SQLITE_ERROR; goto abort_test; }
     rc = check_error(db, "SELECT column1 FROM (VALUES ('a'), ('b'), ('c')) ORDER BY column1 COLLATE spin_collation;", "interrupted");
     pthread_join(thread, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // When a call returns, ending its result sets runs the finals of the window functions they
+    // were computing, and those finals belong to the call. A cancel that lands while they are
+    // ended stops every one, and the result sets read on as interrupted: here the newer result
+    // set's final starts the cancel and never ends, then the older one's never ends.
+    rc = db_exec(db, "SELECT js_create_window('loop_final', 'total = 0;', '(function (args) { total += args[0]; })', '(function () { while (true) {} })', '(function () { return total; })', '(function (args) { total -= args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_create_window('start_final', 'total = 0;', '(function (args) { total += args[0]; })', '(function () { db.exec(\"SELECT started()\").next(); while (true) {} })', '(function () { return total; })', '(function (args) { total -= args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    test_js_started = 0;
+    if (pthread_create(&thread, NULL, test_cancel_all_worker, NULL) != 0) { rc = SQLITE_ERROR; goto abort_test; }
+    rc = check_error(db, "SELECT js_eval('globalThis.a = db.exec(\"SELECT loop_final(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\"); a.next(); globalThis.b = db.exec(\"SELECT start_final(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\"); b.next(); 0');", "interrupted");
+    pthread_join(thread, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('[a, b].map((r) => { try { r.next(); return \"open\"; } catch (e) { return e.message; } }).join()');", "interrupted,interrupted");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // A cancel that lands as a call returns, after its JavaScript last checked for one, stops the
+    // final that ending its result set runs, and the call fails rather than skipping the final
+    rc = sqlite3_create_function(db, "cancel_now", 0, SQLITE_UTF8, NULL, test_cancel_now, NULL, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "CREATE TABLE ran(x); SELECT js_create_window('long_final', 'total = 0;', '(function (args) { total += args[0]; })', '(function () { let s = 0; for (let i = 0; i < 20000000; i++) s += i; db.exec(\"INSERT INTO ran VALUES (1)\").next(); return total; })', '(function () { return total; })', '(function (args) { total -= args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('globalThis.c = db.exec(\"SELECT long_final(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\"); c.next(); db.exec(\"SELECT cancel_now()\").next(); 0');", "interrupted");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT count(*) FROM ran;", "0");
     if (rc != SQLITE_OK) goto abort_test;
 
     // JavaScript that begins afterwards runs normally, on this connection and on a new one
