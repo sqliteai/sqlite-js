@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.3] - 2026-11-16
+
+This release adds one C function, `sqlitejs_cancel_all()`, for a host that has no other way to stop
+JavaScript that does not come back. Nothing changes for an application that never calls it: SQL and
+JavaScript behave exactly as on 1.4.2 until a cancel arrives.
+
+### Added
+
+- **`sqlitejs_cancel_all()` stops all JavaScript running now, in every connection.** Each call into JavaScript fails with an "interrupted" error, even code that catches every exception, and JavaScript that begins afterwards runs normally. It is safe to call from any thread, and it works on every SQLite version, including those before 3.41.0 where `sqlite3_interrupt()` cannot reach JavaScript at all. It exists for hosts whose own cancelling cannot: Android cancels a query with a progress handler, which SQLite never calls while a function is running, and Room 2.7 and later pass no cancellation signal at all, so a runaway function could previously only be stopped by killing the process. **The connection whose JavaScript is stopped is interrupted as well**, as `sqlite3_interrupt()` does it, because a collation cannot report an error and its sort would otherwise go on calling JavaScript, each call beginning after the cancel; so any other statement that connection has in progress fails with SQLITE_INTERRUPT too, and `sqlite3_is_interrupted()` stays true for it until the connection next prepares or steps a statement with none of its own still running. The function is declared in `sqlitejs.h` and exported from the Windows DLL.
+- **A result set the cancelled call left open reads on as "interrupted"**, where 1.4.2 says it was closed when the call that created it returned. Ending such a result set runs the `final` of the window or aggregate function its statement was computing, and those finals belong to the call that is being cancelled: one that never ends is stopped, and its statement fails with an interrupt, rather than hanging the statement for good on SQLite before 3.41.0. A short `final` can still run to its end before the engine's next interrupt check.
+- **A cancel never stops the JavaScript the extension itself runs to set a connection up**, so a connection opening while cancels are in flight still comes up complete: neither the code run while the extension loads nor the functions `js_init_table(1)` restores from the `js_functions` table are cancelled. Only that work is exempt — JavaScript it reaches through SQL is a call of its own and is cancelled — and on SQLite 3.41.0 and later `sqlite3_interrupt()` still stops setup JavaScript that never ends.
+
 ## [1.4.2] - 2026-11-13
 
 One change in this release can alter the behavior of JavaScript that works on 1.4.1: a `db.exec()`

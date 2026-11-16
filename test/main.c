@@ -1047,6 +1047,211 @@ abort_test:
     return rc;
 }
 
+// MARK: - Cancel all -
+
+// Set by started(), an SQL function that the JavaScript under test calls before it spins, so
+// that the worker cancels only JavaScript that is running: a cancel that came first would not
+// stop it
+static int test_js_started;
+
+static void test_started (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    (void)argc; (void)argv;
+    __atomic_store_n(&test_js_started, 1, __ATOMIC_RELEASE);
+    sqlite3_result_null(context);
+}
+
+// Cancels from inside the statement under test: the cancel lands before the call returns, but
+// after its JavaScript last checked for one
+static void test_cancel_now (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    (void)argc; (void)argv;
+    sqlitejs_cancel_all();
+    sqlite3_result_null(context);
+}
+
+static void *test_cancel_all_worker (void *ptr) {
+    (void)ptr;
+    // wait for the JavaScript to start, for at most 10 s; cancelling before it starts would
+    // leave it running, so a JavaScript that has not started by then fails the test here
+    for (int i = 0; i < 1000 && !__atomic_load_n(&test_js_started, __ATOMIC_ACQUIRE); ++i) usleep(10 * 1000);
+    if (!__atomic_load_n(&test_js_started, __ATOMIC_ACQUIRE)) {
+        printf("FAIL: the JavaScript under test did not start in 10 seconds\n");
+        fflush(stdout);
+        abort();
+    }
+    sqlitejs_cancel_all();
+    return NULL;
+}
+
+static int test_cancelling;
+
+static void *test_cancel_loop (void *ptr) {
+    (void)ptr;
+    while (__atomic_load_n(&test_cancelling, __ATOMIC_ACQUIRE)) sqlitejs_cancel_all();
+    return NULL;
+}
+
+// Opens connections while another thread cancels without pause. Setting up a connection runs
+// JavaScript of its own, and a cancel that stopped it made the connection fail to load.
+static int test_cancel_during_open (void) {
+    pthread_t thread;
+    __atomic_store_n(&test_cancelling, 1, __ATOMIC_RELEASE);
+    if (pthread_create(&thread, NULL, test_cancel_loop, NULL) != 0) return SQLITE_ERROR;
+    int rc = SQLITE_OK;
+    for (int i = 0; (i < 200) && (rc == SQLITE_OK); ++i) {
+        sqlite3 *db = NULL;
+        rc = test_open(&db);
+        if (rc != SQLITE_OK) printf("FAIL: connection %d did not open while another thread cancelled: %s\n", i, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
+        if (db) sqlite3_close(db);
+    }
+    __atomic_store_n(&test_cancelling, 0, __ATOMIC_RELEASE);
+    pthread_join(thread, NULL);
+    return rc;
+}
+
+// Opens a database file with the extension loaded, as test_open does an in-memory one.
+static int test_open_path (sqlite3 **db, const char *path) {
+    int rc = sqlite3_open(path, db);
+    if (rc != SQLITE_OK) return rc;
+
+    #if JS_LOAD_EMBEDDED
+    return sqlite3_js_init(*db, NULL, NULL);
+    #else
+    rc = sqlite3_enable_load_extension(*db, 1);
+    if (rc != SQLITE_OK) return rc;
+    return db_exec(*db, "SELECT load_extension('./dist/js');");
+    #endif
+}
+
+// Restores the functions of the js_functions table while another thread cancels without pause.
+// Loading one runs its JavaScript, and a cancel that stopped it left the connection without the
+// function: js_init_table(1) failed with "interrupted", which an app that does not look at the
+// result of that statement never sees, so a pooled connection came up unable to run a query of
+// its own. The init code here is long enough to reach one of QuickJS's interrupt checks, so
+// every load was stopped without the exemption; a short one could finish before the first check.
+static int test_cancel_during_load (void) {
+    const char *path = "js_cancel_load.sqlite";
+    remove(path);
+
+    sqlite3 *db = NULL;
+    int rc = test_open_path(&db, path);
+    if (rc == SQLITE_OK) rc = check_query(db, "SELECT js_init_table();", "0");
+    if (rc == SQLITE_OK) rc = check_query(db, "SELECT js_create_aggregate('slow_total', 'var warm = 0; for (var i = 0; i < 1000000; i++) warm += i; total = 0;', '(function (args) { total += args[0]; })', '(function () { return total; })');", "0");
+    if (db) sqlite3_close(db);
+    if (rc != SQLITE_OK) { remove(path); return rc; }
+
+    pthread_t thread;
+    __atomic_store_n(&test_cancelling, 1, __ATOMIC_RELEASE);
+    if (pthread_create(&thread, NULL, test_cancel_loop, NULL) != 0) { remove(path); return SQLITE_ERROR; }
+    for (int i = 0; (i < 10) && (rc == SQLITE_OK); ++i) {
+        db = NULL;
+        rc = test_open_path(&db, path);
+        if (rc == SQLITE_OK) {
+            rc = check_query(db, "SELECT js_init_table(1);", "0");
+            if (rc != SQLITE_OK) printf("FAIL: connection %d loaded none of its stored functions while another thread cancelled: %s\n", i, sqlite3_errmsg(db));
+        }
+        if (db) sqlite3_close(db);
+    }
+    __atomic_store_n(&test_cancelling, 0, __ATOMIC_RELEASE);
+    pthread_join(thread, NULL);
+
+    // a function loaded that way is the one the table holds, and runs once the cancels stop
+    if (rc == SQLITE_OK) {
+        db = NULL;
+        rc = test_open_path(&db, path);
+        if (rc == SQLITE_OK) rc = check_query(db, "SELECT js_init_table(1);", "0");
+        if (rc == SQLITE_OK) rc = check_query(db, "SELECT slow_total(column1) FROM (VALUES (1), (2), (3));", "6");
+        if (db) sqlite3_close(db);
+    }
+
+    remove(path);
+    return rc;
+}
+
+// sqlitejs_cancel_all() stops the JavaScript running in every connection, as Android's own
+// cancelling (a progress handler, which SQLite never calls while a function runs) cannot.
+int test_cancel_all (void) {
+    sqlite3 *db = NULL, *db2 = NULL;
+    pthread_t thread;
+
+    int seconds = 30;
+    pthread_t watchdog;
+    test_watchdog_stop = 0;
+    bool watching = (pthread_create(&watchdog, NULL, test_watchdog, &seconds) == 0);
+
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = sqlite3_create_function(db, "started", 0, SQLITE_UTF8, NULL, test_started, NULL, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_create_scalar('spin', '(function (args) { db.exec(\"SELECT started()\").next(); for (;;) { try { while (true) {} } catch (e) {} } })');");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // JavaScript running now stops, even code that catches every exception
+    test_js_started = 0;
+    if (pthread_create(&thread, NULL, test_cancel_all_worker, NULL) != 0) { rc = SQLITE_ERROR; goto abort_test; }
+    rc = check_error(db, "SELECT spin();", "interrupted");
+    pthread_join(thread, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // a collation cannot report an error, so its statement is interrupted too: otherwise the sort
+    // would go on calling it, and each call, begun after the cancel, would run
+    rc = db_exec(db, "SELECT js_create_collation('spin_collation', '(function (a, b) { db.exec(\"SELECT started()\").next(); for (;;) {} })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    test_js_started = 0;
+    if (pthread_create(&thread, NULL, test_cancel_all_worker, NULL) != 0) { rc = SQLITE_ERROR; goto abort_test; }
+    rc = check_error(db, "SELECT column1 FROM (VALUES ('a'), ('b'), ('c')) ORDER BY column1 COLLATE spin_collation;", "interrupted");
+    pthread_join(thread, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // When a call returns, ending its result sets runs the finals of the window functions they
+    // were computing, and those finals belong to the call. A cancel that lands while they are
+    // ended stops every one, and the result sets read on as interrupted: here the newer result
+    // set's final starts the cancel and never ends, then the older one's never ends.
+    rc = db_exec(db, "SELECT js_create_window('loop_final', 'total = 0;', '(function (args) { total += args[0]; })', '(function () { while (true) {} })', '(function () { return total; })', '(function (args) { total -= args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_create_window('start_final', 'total = 0;', '(function (args) { total += args[0]; })', '(function () { db.exec(\"SELECT started()\").next(); while (true) {} })', '(function () { return total; })', '(function (args) { total -= args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    test_js_started = 0;
+    if (pthread_create(&thread, NULL, test_cancel_all_worker, NULL) != 0) { rc = SQLITE_ERROR; goto abort_test; }
+    rc = check_error(db, "SELECT js_eval('globalThis.a = db.exec(\"SELECT loop_final(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\"); a.next(); globalThis.b = db.exec(\"SELECT start_final(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\"); b.next(); 0');", "interrupted");
+    pthread_join(thread, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_eval('[a, b].map((r) => { try { r.next(); return \"open\"; } catch (e) { return e.message; } }).join()');", "interrupted,interrupted");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // A cancel that lands as a call returns, after its JavaScript last checked for one, stops the
+    // final that ending its result set runs, and the call fails rather than skipping the final
+    rc = sqlite3_create_function(db, "cancel_now", 0, SQLITE_UTF8, NULL, test_cancel_now, NULL, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "CREATE TABLE ran(x); SELECT js_create_window('long_final', 'total = 0;', '(function (args) { total += args[0]; })', '(function () { let s = 0; for (let i = 0; i < 20000000; i++) s += i; db.exec(\"INSERT INTO ran VALUES (1)\").next(); return total; })', '(function () { return total; })', '(function (args) { total -= args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('globalThis.c = db.exec(\"SELECT long_final(column1) OVER (ORDER BY column1) FROM (VALUES (1), (2), (3))\"); c.next(); db.exec(\"SELECT cancel_now()\").next(); 0');", "interrupted");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT count(*) FROM ran;", "0");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // JavaScript that begins afterwards runs normally, on this connection and on a new one
+    rc = check_query(db, "SELECT js_eval('1 + 1');", "2");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = test_open(&db2);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db2, "SELECT js_eval('2 + 2');", "4");
+    if (rc != SQLITE_OK) goto abort_test;
+
+    // and a connection opened while cancels go on still loads the extension, and still restores
+    // the functions of its js_functions table
+    rc = test_cancel_during_open();
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = test_cancel_during_load();
+
+abort_test:
+    test_watchdog_stop = 1;
+    if (watching) pthread_join(watchdog, NULL);
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    if (db2) sqlite3_close(db2);
+    return rc;
+}
+
 // MARK: - Stack size -
 
 int test_stack_size (void) {
@@ -1276,6 +1481,7 @@ int main (void) {
     result += test_report("Serialization 3", test_serialization(DB_PATH, true,  3)); // load the new implementations
     result += test_report("Thread", test_thread());
     result += test_report("Interrupt", test_interrupt());
+    result += test_report("Cancel all", test_cancel_all());
     result += test_report("Direct only", test_direct_only());
     result += test_report("Aggregate errors", test_aggregate_errors());
     result += test_report("Exec errors", test_exec_errors());

@@ -124,6 +124,7 @@ ifeq ($(PLATFORM),windows)
 	@echo "    sqlite3_js_init" >> $@
 	@echo "    sqlitejs_version" >> $@
 	@echo "    quickjs_version" >> $@
+	@echo "    sqlitejs_cancel_all" >> $@
 endif
 
 # Clean up
