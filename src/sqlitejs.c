@@ -370,8 +370,10 @@ static int js_interrupt_handler (JSRuntime *rt, void *opaque) {
     UNUSED(rt);
     globaljs_context *js = (globaljs_context *)opaque;
     js_keep_gc_below_limit(js);
-    // Only a call (see js_enter) is cancelled: the JavaScript a connection runs while it is set
-    // up is not one, and stopping it would make the connection fail to load the extension.
+    // Only a call (see js_enter) is cancelled. The one exception is the JavaScript the extension
+    // itself runs while it initialises a connection (globaljs_init, depth 0): stopping it would
+    // make the connection fail to load. Stored functions loaded by js_init_table run as a call,
+    // so they can be cancelled.
     if ((js->depth > 0) && (js->cancel_epoch != js_cancel_epoch_load())) {
         // The statement is interrupted too: a collation cannot report an error, so the
         // statement would go on calling JavaScript, each call beginning after the cancel.
@@ -606,10 +608,9 @@ static void js_enter (globaljs_context *js) {
 static void js_leave (globaljs_context *js) {
     if (--js->depth > 0) return;
     if (!js->rowsets) return;
-    // A cancel (sqlitejs_cancel_all) during the call interrupted it, and before SQLite 3.41 is
-    // the only interrupt that shows: its result sets read on as interrupted.
-    bool cancelled = (js->cancel_epoch != js_cancel_epoch_load());
-    bool interrupted = cancelled || ((sqlite3_libversion_number() >= 3041000) && js->db && sqlite3_is_interrupted(js->db));
+    // A cancel (sqlitejs_cancel_all) is not seen here: js_end_rowsets() marks its result sets
+    // interrupted itself, which is the only way they read so before SQLite 3.41.
+    bool interrupted = (sqlite3_libversion_number() >= 3041000) && js->db && sqlite3_is_interrupted(js->db);
     js_end_rowsets(js, true, interrupted);
 }
 
@@ -954,6 +955,7 @@ static JSValue js_sqlite_exec (JSContext *ctx, sqlite3 *db, const char *sql, int
     rs->vm = vm;
     rs->ncols = sqlite3_column_count(vm);
     rs->ended = false;
+    rs->end_pass = 0;
     rs->interrupted = false;
     rs->orphaned = false;
     rs->prev = rs->next = NULL;

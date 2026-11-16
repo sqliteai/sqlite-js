@@ -21,6 +21,8 @@
 int sqlite3_js_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
 const char *sqlitejs_version (void);
 const char *quickjs_version (void);
+// Stops all JavaScript now running, in every connection. Safe to call from any thread. It
+// stops only JavaScript already running: calls that begin afterwards are not affected.
 void sqlitejs_cancel_all (void);
 
 #endif
