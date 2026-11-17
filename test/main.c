@@ -1636,7 +1636,7 @@ int main (void) {
     if (current > 0) {
         printf("memory leak: %lld\n", current);
     }
-    test_report("Memory", (int)current);
+    result += test_report("Memory", (int)current);
 
     return result;
 }
