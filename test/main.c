@@ -885,6 +885,141 @@ abort_test:
     return rc;
 }
 
+// MARK: - Conversion errors -
+
+// Opens an in-memory database with the extension loaded whose text is UTF-16, as sqlite3_open16()
+// makes it, so that a UTF-8 function reading its text makes SQLite convert and allocate.
+static int test_open_utf16 (sqlite3 **db) {
+    int rc = sqlite3_open16(u":memory:", db);
+    if (rc != SQLITE_OK) return rc;
+    
+    #if JS_LOAD_EMBEDDED
+    return sqlite3_js_init(*db, NULL, NULL);
+    #else
+    rc = sqlite3_enable_load_extension(*db, 1);
+    if (rc != SQLITE_OK) return rc;
+    return db_exec(*db, "SELECT load_extension('./dist/js');");
+    #endif
+}
+
+// Runs text_length(?1) on 1M characters of UTF-16 with too little memory left for their UTF-8
+// copy: the call must fail, not hand the NULL that sqlite3_value_text() returns to JavaScript.
+static int test_text_without_memory (sqlite3 *db) {
+    const int nchars = 1024 * 1024;
+    sqlite3_stmt *stmt = NULL;
+    unsigned short *text = malloc((size_t)nchars * sizeof(unsigned short));
+    if (!text) return SQLITE_NOMEM;
+    for (int i=0; i<nchars; ++i) text[i] = 'a';
+    
+    int rc = sqlite3_prepare_v2(db, "SELECT text_length(?1);", -1, &stmt, NULL);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_text16(stmt, 1, text, nchars * (int)sizeof(unsigned short), SQLITE_TRANSIENT);
+    free(text);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    sqlite3_int64 hard_limit = sqlite3_hard_heap_limit64(-1);
+    sqlite3_hard_heap_limit64(sqlite3_memory_used() + 256 * 1024);
+    rc = sqlite3_step(stmt);
+    sqlite3_hard_heap_limit64(hard_limit);
+    if (rc == SQLITE_ROW) {
+        printf("FAIL: text_length() of 1M characters ran with no memory for their UTF-8 copy\n");
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+    DEBUGF("PASS: text_length() failed with no memory for its argument's UTF-8 copy: %d %s\n", rc, sqlite3_errmsg(db));
+    rc = SQLITE_OK;
+    
+cleanup:
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+// An error while the arguments of a call or the rows of toArray() are put into arrays stops the
+// call: a function never runs with fewer arguments, and toArray() never returns fewer columns.
+int test_conversion_errors (void) {
+    sqlite3 *db = NULL;
+    int rc = test_open(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    rc = db_exec(db, "SELECT js_create_scalar('first_arg', '(function(args){ return (args[0] === undefined) ? \"missing\" : args[0]; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // a setter on Array.prototype makes putting an element into a new array throw
+    rc = db_exec(db, "SELECT js_eval('Object.defineProperty(Array.prototype, \"0\", { set(v) { throw new Error(\"index setter\"); }, configurable: true }); 1');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT first_arg(5);", "index setter");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_eval('db.exec(\"SELECT 1, 2\").toArray().length');", "index setter");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+    // without the setter both work again
+    rc = db_exec(db, "SELECT js_eval('delete Array.prototype[0]; 1');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query_v2(db, "SELECT first_arg(5), js_eval('JSON.stringify(db.exec(\"SELECT 1, 2\").toArray())');", (const char*[]){"5", "[[1,2]]"}, 2);
+    if (rc != SQLITE_OK) goto abort_test;
+    sqlite3_close(db);
+    db = NULL;
+    
+    rc = test_open_utf16(&db);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = db_exec(db, "SELECT js_create_scalar('text_length', '(function(args){ return args[0].length; })');");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT text_length('abc');", "3");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = test_text_without_memory(db);
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT text_length('abcd');", "4");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    return rc;
+}
+
+// MARK: - Store errors -
+
+// A function that js_functions cannot store, here on a read-only connection, is registered on the
+// connection but reported as an error, because it would be gone when the database is reopened.
+int test_store_errors (void) {
+    const char *path = "js_store_errors.sqlite";
+    sqlite3 *db = NULL;
+    remove(path);
+    
+    int rc = sqlite3_open(path, &db);
+    if (rc != SQLITE_OK) goto abort_test;
+    #if JS_LOAD_EMBEDDED
+    rc = sqlite3_js_init(db, NULL, NULL);
+    #else
+    rc = sqlite3_enable_load_extension(db, 1);
+    if (rc == SQLITE_OK) rc = db_exec(db, "SELECT load_extension('./dist/js');");
+    #endif
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT js_init_table();", "0");
+    if (rc != SQLITE_OK) goto abort_test;
+    sqlite3_close(db);
+    db = NULL;
+    
+    rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL);
+    if (rc != SQLITE_OK) goto abort_test;
+    #if JS_LOAD_EMBEDDED
+    rc = sqlite3_js_init(db, NULL, NULL);
+    #else
+    rc = sqlite3_enable_load_extension(db, 1);
+    if (rc == SQLITE_OK) rc = db_exec(db, "SELECT load_extension('./dist/js');");
+    #endif
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_error(db, "SELECT js_create_scalar('not_stored', '(function(args){ return 42; })');", "could not be stored");
+    if (rc != SQLITE_OK) goto abort_test;
+    rc = check_query(db, "SELECT not_stored();", "42");
+    if (rc != SQLITE_OK) goto abort_test;
+    
+abort_test:
+    if (rc != SQLITE_OK && db) printf("Error: %s\n", sqlite3_errmsg(db));
+    if (db) sqlite3_close(db);
+    remove(path);
+    return rc;
+}
+
 // MARK: - Memory limit -
 
 // Creates and runs an aggregate on a new connection with a memory limit of limit_kb, if not 0,
@@ -1488,6 +1623,8 @@ int main (void) {
     result += test_report("Result set lifetime", test_rowset_lifetime());
     result += test_report("Blobs", test_blobs());
     result += test_report("Numbers", test_numbers());
+    result += test_report("Conversion errors", test_conversion_errors());
+    result += test_report("Store errors", test_store_errors());
     result += test_report("Memory limit", test_memory_limit());
     result += test_report("Stack size", test_stack_size());
     result += test_report("Stack on other threads", test_stack_threads());
