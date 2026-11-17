@@ -890,7 +890,8 @@ abort_test:
 // Opens an in-memory database with the extension loaded whose text is UTF-16, as sqlite3_open16()
 // makes it, so that a UTF-8 function reading its text makes SQLite convert and allocate.
 static int test_open_utf16 (sqlite3 **db) {
-    int rc = sqlite3_open16(u":memory:", db);
+    static const unsigned short memory16[] = {':', 'm', 'e', 'm', 'o', 'r', 'y', ':', 0};
+    int rc = sqlite3_open16(memory16, db);
     if (rc != SQLITE_OK) return rc;
     
     #if JS_LOAD_EMBEDDED
@@ -920,8 +921,9 @@ static int test_text_without_memory (sqlite3 *db) {
     sqlite3_hard_heap_limit64(sqlite3_memory_used() + 256 * 1024);
     rc = sqlite3_step(stmt);
     sqlite3_hard_heap_limit64(hard_limit);
-    if (rc == SQLITE_ROW) {
-        printf("FAIL: text_length() of 1M characters ran with no memory for their UTF-8 copy\n");
+    // only the lack of memory for the copy may stop it: any other error would not test the copy
+    if ((rc & 0xff) != SQLITE_NOMEM) {
+        printf("FAIL: text_length() of 1M characters with no memory for their UTF-8 copy\n      Expected: SQLITE_NOMEM, Got: %d %s\n", rc, (rc == SQLITE_ROW) ? "a row" : sqlite3_errmsg(db));
         rc = SQLITE_ERROR;
         goto cleanup;
     }
