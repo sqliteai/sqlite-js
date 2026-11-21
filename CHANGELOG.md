@@ -4,11 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.4.4] - 2026-11-21
 
-One change can make a call that succeeds on 1.4.3 report an error: `js_create_*()` now fails when
-it cannot store the function in the `js_functions` table. See **Changed**. The rest are fixes for
-errors that were silently dropped, one of them a crash.
+One change in this release can make a call that succeeds on 1.4.3 report an error: `js_create_*()`
+now fails when it cannot store the function in the `js_functions` table. See **Changed**. The rest
+are fixes for errors that were silently dropped, one of them a crash.
 
 ### Changed
 
