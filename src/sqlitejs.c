@@ -225,13 +225,23 @@ static JSValue js_rowset_to_array(JSContext *ctx, JSValueConst this_val, int arg
             return JS_EXCEPTION;
         }
         
+        // a value that cannot be converted or stored (out of memory, or a setter a script put on
+        // Array.prototype) is an exception, not a shorter row or a shorter array: JS_SetPropertyUint32
+        // frees the value it is given, also when it fails
         for (int i=0; i<ncols; ++i) {
             sqlite3_value *value = sqlite3_column_value(rs->vm, i);
             JSValue jvalue = sqlite_value_to_js(ctx, value);
-            JS_SetPropertyUint32(ctx, row, i, jvalue);
+            if (JS_IsException(jvalue) || (JS_SetPropertyUint32(ctx, row, i, jvalue) < 0)) {
+                JS_FreeValue(ctx, row);
+                JS_FreeValue(ctx, result);
+                return JS_EXCEPTION;
+            }
         }
         
-        JS_SetPropertyUint32(ctx, result, nrows++, row);
+        if (JS_SetPropertyUint32(ctx, result, nrows++, row) < 0) {
+            JS_FreeValue(ctx, result);
+            return JS_EXCEPTION;
+        }
     }
 
     // as in js_rowset_next: an error is an exception, not a shorter array
@@ -1334,8 +1344,12 @@ static JSValue sqlite_value_to_js (JSContext *ctx, sqlite3_value *value) {
             return JS_NewFloat64(ctx, sqlite3_value_double(value));
             break;
             
-        case SQLITE_TEXT:
-            return JS_NewString(ctx, (const char *)sqlite3_value_text(value));
+        case SQLITE_TEXT: {
+            // NULL when SQLite runs out of memory converting the text to UTF-8
+            const char *text = (const char *)sqlite3_value_text(value);
+            if (!text) return JS_ThrowOutOfMemory(ctx);
+            return JS_NewString(ctx, text);
+            }
             break;
             
         case SQLITE_BLOB: {
@@ -1367,16 +1381,21 @@ static char *sqlite_strdup (const char *str) {
 // MARK: - Execution -
 
 static void js_execute_common (sqlite3_context *context, JSContext *js_context, int nvalues, sqlite3_value **values, JSValue func, JSValue this_obj, bool return_value) {
-    // create JS array for arguments
+    // create JS array for arguments: an argument that cannot be converted or stored (out of memory,
+    // or a setter a script put on Array.prototype) fails the call instead of leaving it out, and
+    // JS_SetPropertyUint32 frees the value it is given, also when it fails
     JSValue args = (values) ? JS_NewArray(js_context) : JS_NULL;
-    for (int i=0; i<nvalues; ++i) {
+    for (int i=0; (i<nvalues) && !JS_IsException(args); ++i) {
         JSValue js_val = sqlite_value_to_js(js_context, values[i]);
-        JS_SetPropertyUint32(js_context, args, i, js_val);
+        if (JS_IsException(js_val) || (JS_SetPropertyUint32(js_context, args, i, js_val) < 0)) {
+            JS_FreeValue(js_context, args);
+            args = JS_EXCEPTION;
+        }
     }
     
     // call the JavaScript function with args_array as the argument
     JSValueConst args_val[] = {args};
-    JSValue result = JS_Call(js_context, func, this_obj, (values) ? 1 : 0, (values) ? args_val : NULL);
+    JSValue result = (JS_IsException(args)) ? JS_EXCEPTION : JS_Call(js_context, func, this_obj, (values) ? 1 : 0, (values) ? args_val : NULL);
     JS_FreeValue(js_context, args);
     
     if (return_value) js_value_to_sqlite(context, js_context, result);
@@ -1664,8 +1683,20 @@ static bool js_create_function (sqlite3_context *context, const char *type, cons
     // so for collations the function context has to be released here
     if ((rc != SQLITE_OK) && is_collation) functionjs_free(fctx);
     
-    if ((is_load == false) && (rc == SQLITE_OK)) {
-        js_add_to_table(context, type, name, init_code, step_code, final_code, value_code, inverse_code);
+    // a function that is registered but not stored (on a read-only connection, for example) would
+    // be gone when the database is reopened, so it is an error even though this connection has it
+    if ((is_load == false) && (rc == SQLITE_OK) && !js_add_to_table(context, type, name, init_code, step_code, final_code, value_code, inverse_code)) {
+        sqlite3 *db = sqlite3_context_db_handle(context);
+        int code = sqlite3_errcode(db);
+        char *msg = sqlite3_mprintf("The function was registered on this connection, but it could not be stored in js_functions: %s", sqlite3_errmsg(db));
+        if (!msg) {
+            sqlite3_result_error_nomem(context);
+            return false;
+        }
+        sqlite3_result_error(context, msg, -1);
+        sqlite3_free(msg);
+        sqlite3_result_error_code(context, (code != SQLITE_OK) ? code : SQLITE_ERROR);
+        return false;
     }
     
     // js_execute_cleanup is automatically called in case of error (collations excluded, see above)
