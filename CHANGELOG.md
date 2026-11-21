@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+One change can make a call that succeeds on 1.4.3 report an error: `js_create_*()` now fails when
+it cannot store the function in the `js_functions` table. See **Changed**. The rest are fixes for
+errors that were silently dropped, one of them a crash.
+
+### Changed
+
+- **`js_create_scalar`, `js_create_aggregate`, `js_create_window` and `js_create_collation` report an error when the function cannot be stored in `js_functions`.** 1.4.3 reported success, and the function was then gone when the database was reopened. The message reads "The function was registered on this connection, but it could not be stored in js_functions", followed by SQLite's reason, and the error code is SQLite's own: for example SQLITE_READONLY on a read-only connection or under `PRAGMA query_only`, or SQLITE_BUSY when another connection is writing. **The function is still registered and works on this connection.** Nothing changes for a database without a `js_functions` table.
+
+### Fixed
+
+- **An argument that cannot be converted no longer makes a function run with fewer arguments.** When putting an argument into the array a JavaScript function receives failed, because QuickJS ran out of memory or because a script had put a setter on `Array.prototype`, the function ran without that argument and the exception stayed pending. The call now fails with that exception before the function runs.
+- **`toArray()` no longer returns shorter rows or a shorter array when a value cannot be stored.** It now throws that exception. As when allocating a row fails, the result set stays open after the row that failed, so a script that catches the exception and reads on gets the rows after it.
+- **Text that SQLite cannot convert to UTF-8 no longer crashes.** When SQLite ran out of memory converting text, for example on a UTF-16 database, the NULL it returned was passed to `strlen()`. It is now an "out of memory" error.
+
 ## [1.4.3] - 2026-11-16
 
 This release adds one C function, `sqlitejs_cancel_all()`, for a host that has no other way to stop
